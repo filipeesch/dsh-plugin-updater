@@ -98,7 +98,7 @@ describe('browser bundle', () => {
 describe('the pinned-spec warning survives the reload', () => {
   const bundle = () => loadBundle().exports.get('dsh-plugin-updater')
 
-  it('is attached to the row when the row is rebuilt from the snapshot', () => {
+  it('is attached to the row when the row is rebuilt from the snapshot', ZOD_REQUIRED, () => {
     // This is the exact reload that erased it: rowsFromSnapshot rebuilt the row
     // from `updates[]`, which never carried the field, so the notice showed for
     // one frame and was replaced by a clean row.
@@ -112,7 +112,7 @@ describe('the pinned-spec warning survives the reload', () => {
     assert.equal(rows[0].specRestoreFailed, 'could not write package.json')
   })
 
-  it('does not mark an unaffected plugin', () => {
+  it('does not mark an unaffected plugin', ZOD_REQUIRED, () => {
     const rows = bundle().rowsFromSnapshot({
       updates: [
         { name: 'a', kind: 'git', identity: {} },
@@ -124,7 +124,7 @@ describe('the pinned-spec warning survives the reload', () => {
     assert.equal(rows[1].specRestoreFailed, undefined)
   })
 
-  it('marks a local reload and an unchecked candidate too', () => {
+  it('marks a local reload and an unchecked candidate too', ZOD_REQUIRED, () => {
     const rows = bundle().rowsFromSnapshot({
       updates: [],
       reloads: [{ name: 'local-a', installed: '1.0.0' }],
@@ -135,12 +135,12 @@ describe('the pinned-spec warning survives the reload', () => {
     assert.equal(rows[1].specRestoreFailed, 'y')
   })
 
-  it('is absent from a snapshot that reports none', () => {
+  it('is absent from a snapshot that reports none', ZOD_REQUIRED, () => {
     const rows = bundle().rowsFromSnapshot({ updates: [{ name: 'a', kind: 'git', identity: {} }] })
     assert.equal(rows[0].specRestoreFailed, undefined)
   })
 
-  it('counts it in the batch summary, which otherwise reads as a clean run', () => {
+  it('counts it in the batch summary, which otherwise reads as a clean run', ZOD_REQUIRED, () => {
     // Without this count a batch that leaves a spec pinned says "2 updated" and
     // gives the user no reason to open the detail.
     const translate = (key, vars) => `${key}:${vars?.count ?? ''}`
@@ -152,7 +152,7 @@ describe('the pinned-spec warning survives the reload', () => {
     assert.ok(summary.includes('summary.updated:2'), summary)
   })
 
-  it('says nothing about it when no spec stayed pinned', () => {
+  it('says nothing about it when no spec stayed pinned', ZOD_REQUIRED, () => {
     const translate = (key, vars) => `${key}:${vars?.count ?? ''}`
     const summary = bundle().summaryNoticeOf([{ outcome: 'updated' }], 0, translate)
     assert.ok(!summary.includes('summary.specRestoreFailed'), summary)

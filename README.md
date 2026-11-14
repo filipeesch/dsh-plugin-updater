@@ -55,6 +55,17 @@ On first use, the repositories of the plugins currently installed from git are p
 - Node.js `>=22.19.0`
 - `git` on `PATH` for git-installed plugins, and `pnpm` as the profile's package manager
 
+## Development
+
+Install the test-only peer first, then run the suite:
+
+    npm install
+    npm test
+
+That install is for the tests alone: the plugin has no runtime dependency and
+needs no build step. Without it, the tests that load the browser bundle skip
+rather than fail, because zod is supplied by the host profile at runtime.
+
 ## License
 
 MIT

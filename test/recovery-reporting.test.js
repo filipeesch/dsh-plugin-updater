@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { restoreSavedSpec, updateGit } from '../src/apply.js'
-import { loadBundle } from './helpers/bundle.js'
+import { loadBundle, ZOD_REQUIRED } from './helpers/bundle.js'
 import { UpdaterService } from '../src/host.js'
 
 /**
@@ -198,7 +198,7 @@ describe('the pinned-spec warning persists across a reload', () => {
     }
   })
 
-  it('reaches the row the panel rebuilds', async () => {
+  it('reaches the row the panel rebuilds', ZOD_REQUIRED, async () => {
     // End to end: the host records it, the snapshot carries it, and the row the
     // client rebuilds from that snapshot shows it.
     const dir = await mkdtemp(join(tmpdir(), 'updater-row-'))
