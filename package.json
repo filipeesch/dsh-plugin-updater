@@ -1,0 +1,67 @@
+{
+  "name": "dsh-plugin-updater",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One-click updates for DeepSeek Harness plugins, including plugins installed from GitHub or a local directory, with a pending-count entry in the sidebar",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "cordis",
+    "plugin-updater"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/filipeesch/dsh-plugin-updater.git"
+  },
+  "homepage": "https://github.com/filipeesch/dsh-plugin-updater#readme",
+  "bugs": {
+    "url": "https://github.com/filipeesch/dsh-plugin-updater/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0",
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./remote": "./src/remote.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "src/",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.5",
+    "@deepseek-ai/dsh-plugin-manager": ">=0.2.2-rc.1",
+    "zod": "^4.0.0"
+  },
+  "scripts": {
+    "check": "node scripts/check-sources.js",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "zod": "^4.0.0"
+  }
+}

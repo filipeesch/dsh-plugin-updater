@@ -1,0 +1,41 @@
+# Dependencies (never committed: this plugin has no build step and
+# ships plain ESM)
+node_modules/
+
+# Package manager store and debug output
+.pnpm-store/
+# Lockfiles: a plugin's own lockfile is the host profile's business, and a
+# stray one from the wrong package manager would be read as authoritative.
+package-lock.json
+yarn.lock
+
+pnpm-debug.log*
+npm-debug.log*
+yarn-error.log*
+
+# Build, cache and coverage artifacts
+lib/
+dist/
+dist-exe/
+*.tsbuildinfo
+coverage/
+.cache/
+tmp/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Agent scratch output (reports, traces) that must not leave the machine
+.dsh-report/
+.dsh-build/
+.artifacts/
+.ui-review/
