@@ -92,6 +92,23 @@ export class CheckScheduler {
   }
 
   /**
+   * Wait for the running cycle, when one is in progress.
+   *
+   * A caller that needs the next result to include a cycle already under way
+   * awaits this instead of starting a second one, which the scheduler refuses.
+   * @returns {Promise<void>} Resolves after the cycle settles, failure included.
+   */
+  async whenIdle() {
+    if (this.running === undefined) return
+    try {
+      await this.running
+    } catch {
+      // The failure is reported through onStateChange; a caller waiting for the
+      // cycle to finish has nothing to add.
+    }
+  }
+
+  /**
    * Whether a cycle is in progress.
    * @returns {boolean} True while running.
    */

@@ -65,6 +65,7 @@ export async function restoreSavedSpec(input) {
  *   decideApproval?: (failure: object) => Promise<{decision: 'none'|'approve'|'ask', keys: string[]}>,
  *   approveBuilds?: (keys: string[], spec: string) => Promise<object>,
  *   signal?: AbortSignal,
+ *   requestId?: string,
  *   onPhase?: (phase: string) => void
  * }} input Candidate facts and host capabilities.
  * @returns {Promise<{
@@ -170,6 +171,7 @@ export async function updateGit(input) {
 async function install(input, commit) {
   return settle(() => input.host.installBundle(pinnedSpec(input.repository, commit), {
     saveExact: true, enabled: true,
+    ...input.requestId === undefined ? {} : { requestId: input.requestId },
   }))
 }
 
@@ -193,7 +195,10 @@ async function restore(input, cause) {
   const spec = input.previousCommit === undefined
     ? movingSpec(input.repository)
     : pinnedSpec(input.repository, input.previousCommit)
-  const outcome = await settle(() => input.host.installBundle(spec, { saveExact: true, enabled: true }))
+  const outcome = await settle(() => input.host.installBundle(spec, {
+    saveExact: true, enabled: true,
+    ...input.requestId === undefined ? {} : { requestId: input.requestId },
+  }))
   const unfixed = await restoreSavedSpec({ profileDir: input.profileDir, name: input.name, saved: input.saved })
   const restored = succeeded(outcome)
   const recovery = `reinstall ${spec} to recover`
@@ -219,7 +224,8 @@ async function restore(input, cause) {
  * @param {{
  *   name: string,
  *   version: string,
- *   host: {updateBundle: (name: string, version: string) => Promise<object>},
+ *   host: {updateBundle: (name: string, version: string, options?: object) => Promise<object>},
+ *   requestId?: string,
  *   onPhase?: (phase: string) => void
  * }} input Candidate facts and host capability.
  * @returns {Promise<{outcome: 'updated'|'failed', step: 'install', result?: object, reason?: string}>}
@@ -227,7 +233,11 @@ async function restore(input, cause) {
  */
 export async function updateRegistry(input) {
   input.onPhase?.('installing')
-  const result = await settle(() => input.host.updateBundle(input.name, input.version))
+  const result = await settle(() => input.host.updateBundle(
+    input.name,
+    input.version,
+    input.requestId === undefined ? undefined : { requestId: input.requestId },
+  ))
   if (!result.ok) return { outcome: 'failed', step: 'install', reason: result.reason }
   // The host nests this outcome one level deeper on the registry path.
   const application = /** @type {{result?: {application?: string}}} */ (result.value)?.result?.application

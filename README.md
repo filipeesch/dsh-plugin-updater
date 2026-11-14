@@ -2,7 +2,7 @@
 
 One-click updates for the plugins installed in a DeepSeek Harness profile, including plugins installed from GitHub and plugins installed from a local directory.
 
-DeepSeek Harness can already update a plugin that is a third-party package installed from a registry under its own name. It offers no update path for a plugin installed from a git spec or from a local directory. Plugin Updater covers that gap without changing any DeepSeek Harness package: it adds one entry above Settings in the sidebar and one panel with two tabs.
+DeepSeek Harness can already update a plugin that is a third-party package installed from a registry under its own name. It offers no update path for a plugin installed from a git spec or from a local directory. Plugin Updater covers that gap without changing any DeepSeek Harness package: it adds one entry above Settings in the sidebar and one panel with two tabs, designed to match the application's own plugin manager.
 
 ## Install
 
@@ -24,12 +24,14 @@ Or add the dependency to the profile and select the bundle:
 - Shows release notes for a git update, read from the commits between the installed commit and HEAD.
 - Updates a git plugin by removing and reinstalling it, and restores the previous commit if the attempt fails or is cancelled. The saved dependency spec is left unpinned, so later detection keeps following HEAD.
 - Offers a reload, rather than an update, for a plugin installed from a local directory, and only while its files are newer than the running application.
-- Approves build scripts automatically only for repositories you mark as trusted; anything else asks first.
-- Checks on start and every 60 minutes, in the background, and offers a manual refresh.
+- Approves build scripts automatically only for repositories you mark as trusted; anything else asks first, with the exact entries shown before you decide.
+- Shows each update while it runs: the current step, the package manager output on demand, and a completion notice even when the panel is closed.
+- Keeps the settled result on its row until you dismiss it or start another check, so a finished update never disappears silently.
+- Checks on start and every 60 minutes, in the background, and offers a manual check. Opening the panel reads the current state instead of starting another detection.
 
 ## Where it appears
 
-One entry in the sidebar footer, above Settings. It shows how many plugins need attention, including plugins awaiting a reload and plugins whose check failed. The count opens the panel; the refresh control beside it starts a check without opening anything.
+One entry in the sidebar footer, above Settings. It shows how many plugins need attention, including plugins awaiting a reload and plugins whose check failed. A small dot marks a failed check; the refresh control starts a check without opening anything, and the entry indicates when an update is running.
 
 ## Configuration
 
@@ -38,13 +40,13 @@ Both lists live in the Settings tab of the panel, stored in the plugin configura
 - **Trusted repositories**: `host/owner/repo` entries. Trust is per repository, never per account, and a wildcard is refused. Approving a build script writes only the exact key the package manager reported.
 - **Ignored updates**: an ignored git update is identified by its commit and an ignored registry update by its version, so a later, different update is reported again.
 
-On first use, the repositories of the plugins currently installed from git are proposed for confirmation. Nothing is trusted until you confirm.
+Every git candidate whose repository is not trusted offers **Trust this repository** on its own row. Nothing is trusted until you use that action or confirm the same repository from a build approval request.
 
 ## Limitations
 
 - It does not update DeepSeek Harness itself.
 - It does not install new plugins; use the application's own installation dialog for that.
-- The periodic check advances only while the interface is open. Opening the interface always triggers a check.
+- The periodic check advances only while the interface is open. Opening the panel reads the current state; a detection starts at interface start, every 60 minutes, or when you ask for one. A check the host starts on its own is reflected when it finishes; the refresh control shows progress for checks started from the panel.
 - Replacing a git plugin removes it before installing the new commit, so the plugin is briefly absent. The previous commit is restored if the installation fails.
 - Release notes need a local clone of the repository, kept in a cache of at most 100 MB. A repository larger than that is fetched again on each check.
 - It registers no agent tool; every operation is a user action.

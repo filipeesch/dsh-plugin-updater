@@ -67,6 +67,30 @@ describe('CheckScheduler', () => {
     assert.equal(scheduler.isRunning(), false)
   })
 
+  it('waits for a running cycle', async () => {
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const scheduler = new CheckScheduler({ check: async () => { await gate; return { total: 1 } } })
+    const running = scheduler.run('manual')
+    const waiting = scheduler.whenIdle()
+    release()
+    await running
+    await waiting
+    assert.equal(scheduler.isRunning(), false)
+  })
+
+  it('resolves immediately when idle', async () => {
+    const scheduler = new CheckScheduler({ check: async () => ({}) })
+    await scheduler.whenIdle()
+  })
+
+  it('resolves after a cycle that failed', async () => {
+    const scheduler = new CheckScheduler({ check: async () => { throw new Error('down') } })
+    const running = scheduler.run('manual').catch(() => {})
+    await scheduler.whenIdle()
+    await assert.doesNotReject(running)
+  })
+
   it('starts and stops the interval', () => {
     const scheduler = new CheckScheduler({ check: async () => ({}) })
     scheduler.start()

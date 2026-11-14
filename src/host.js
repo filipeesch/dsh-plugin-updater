@@ -18,6 +18,7 @@ import { readConfig, mergeConfig } from './config.js'
 import { readBundles, readInstalledCommits } from './profile.js'
 import { CheckScheduler } from './schedule.js'
 import { parseDependency } from './spec.js'
+import { addTrusted, isTrusted, parseTrustedRepository } from './trust.js'
 
 /** How a check is asked for. */
 const TRIGGERS = new Set(['startup', 'interval', 'manual'])
@@ -55,6 +56,17 @@ export class UpdaterService {
     this.specRestoreFailures = new Map()
     this.cancellation = undefined
     this.checkFailure = undefined
+    // One queue or single update at a time, exposed to the panel while it runs:
+    // the client cannot see the host's own progress events, so the records here
+    // are what the snapshot polls.
+    this.run = undefined
+    this.runSequence = 0
+    // A re-check must not overlap a detection started elsewhere; this holds the
+    // in-flight re-check so a detection can wait for it.
+    this.rechecking = undefined
+    // A build approval the user still has to decide. The keys and the target
+    // stay on the host; the client only names the candidate and the decision.
+    this.pendingApprovals = new Map()
     // The installation inventory is read once per host start: it cannot change
     // while the process runs.
     this.shipped = undefined
@@ -113,15 +125,15 @@ export class UpdaterService {
    * @returns {Promise<object>} The check outcome.
    */
   async check() {
+    // The interval scheduler does not go through refresh(), so it needs the
+    // same wait as a manual check.
+    if (this.rechecking !== undefined) await this.rechecking.catch(() => {})
     const shipped = await this.installedByHarness()
     const bundles = await readBundles(this.profileDir, parseDependency, { installationProvides: shipped })
     const commits = await readInstalledCommits(this.profileDir)
     // Record the installed commit on each candidate: it is what a failed update
     // restores to, and the lockfile is the only place it appears.
-    for (const bundle of bundles) {
-      const commit = commits.get(bundle.name)
-      if (commit !== undefined) /** @type {Record<string, unknown>} */ (bundle).installedCommit = commit
-    }
+    attachInstalledCommits(bundles, commits)
     const { ignoredUpdates } = this.config()
     const result = await runCheck({
       candidates: bundles,
@@ -137,6 +149,7 @@ export class UpdaterService {
       reloads,
       total: result.updates.length + reloads.length + result.unchecked.length,
     }
+    this.pruneApprovals()
     return this.lastCheck
   }
 
@@ -178,7 +191,8 @@ export class UpdaterService {
       specRestoreFailed: this.currentSpecRestoreFailures(),
       cache: usage,
       running: this.scheduler.isRunning(),
-      proposedRepositories: this.proposeRepositories(current),
+      run: this.currentRun(),
+      approvals: this.currentApprovals(),
       // A cycle that threw leaves the previous counts in place; reporting them as
       // current would read as "all good" on a failure.
       current: this.checkFailure === undefined,
@@ -188,33 +202,103 @@ export class UpdaterService {
   }
 
   /**
-   * The repositories to propose for trust before the user has decided.
-   *
-   * Trust is offered only once, and only for the repositories of plugins the
-   * user already chose to install. An explicit empty list counts as a decision,
-   * so declining the proposal does not make it reappear on every open.
-   * @param {object} state The current check result.
-   * @returns {string[]} Repositories awaiting confirmation, or an empty list.
-   */
-  proposeRepositories(state) {
-    const raw = this.configOf()
-    if (typeof raw === 'object' && raw !== null && Object.hasOwn(raw, 'trustedRepositories')) return []
-    const repositories = []
-    for (const candidate of state.candidates ?? []) {
-      const parsed = /** @type {{kind?: string, repository?: string}} */ (candidate.parsed ?? {})
-      if (parsed.kind === 'git' && parsed.repository !== undefined && !repositories.includes(parsed.repository)) {
-        repositories.push(parsed.repository)
-      }
-    }
-    return repositories
-  }
-
-  /**
    * Run a check on demand.
    * @returns {Promise<object>} The check outcome.
    */
   async refresh() {
+    // A re-check updates the same result set; starting a detection while it
+    // reads the profile would let the two merge from different starts.
+    if (this.rechecking !== undefined) await this.rechecking.catch(() => {})
     await this.scheduler.run('manual')
+    return this.snapshot()
+  }
+
+  /**
+   * Refresh after an update without letting a failed check discard the result.
+   *
+   * The update already applied; if the following check cannot read the profile
+   * or the network, the settled outcome is still the answer, and the next check
+   * reports the state.
+   * @returns {Promise<void>}
+   */
+  async refreshQuietly() {
+    try {
+      await this.refresh()
+    } catch (error) {
+      this.log.warn?.('Plugin Updater: the check after an update failed', error)
+    }
+  }
+
+  /**
+   * Check one failed candidate without running detection for the others.
+   *
+   * The full check waits for a running cycle first: starting a second detection
+   * is what the scheduler refuses, and a retry that silently did nothing would
+   * read as a dead control.
+   * @param {{name?: string}} [request] Candidate name.
+   * @returns {Promise<object>} The snapshot after the candidate's result was merged.
+   */
+  async recheck(request = {}) {
+    const name = typeof request.name === 'string' ? request.name : ''
+    if (name === '') throw new Error('recheck needs the name of an installed plugin')
+    if (this.rechecking !== undefined) await this.rechecking.catch(() => {})
+    const work = this.performRecheck(name)
+    this.rechecking = work
+    try {
+      return await work
+    } finally {
+      if (this.rechecking === work) this.rechecking = undefined
+    }
+  }
+
+  /**
+   * Check one named candidate and merge its result into the last check.
+   * @param {string} name Candidate name.
+   * @returns {Promise<object>} The snapshot afterwards.
+   */
+  async performRecheck(name) {
+    await this.scheduler.whenIdle()
+    const shipped = await this.installedByHarness()
+    const bundles = await readBundles(this.profileDir, parseDependency, { installationProvides: shipped })
+    const commits = await readInstalledCommits(this.profileDir)
+    // Every candidate keeps its installed commit: a later failed update of a
+    // neighbour must restore the commit it was installed at, not the moving
+    // spec.
+    attachInstalledCommits(bundles, commits)
+    const candidate = bundles.find((entry) => entry.name === name)
+    if (candidate === undefined) throw new Error(`${name} is not an installed plugin candidate`)
+    const { ignoredUpdates } = this.config()
+    const result = await runCheck({
+      candidates: [candidate],
+      commits,
+      cache: this.cache,
+      ignored: ignoredUpdates,
+      listVersions: (bundleName) => this.pluginManager.listVersions(bundleName),
+    })
+    if (this.lastCheck === undefined) {
+      this.lastCheck = {
+        ...result,
+        candidates: bundles,
+        reloads: [],
+        total: result.updates.length + result.unchecked.length,
+      }
+    } else {
+      const updates = this.lastCheck.updates.filter((entry) => entry.name !== name)
+      const ignored = this.lastCheck.ignored.filter((entry) => entry.name !== name)
+      const unchecked = this.lastCheck.unchecked.filter((entry) => entry.name !== name)
+      updates.push(...result.updates)
+      ignored.push(...result.ignored)
+      unchecked.push(...result.unchecked)
+      this.lastCheck = {
+        ...this.lastCheck,
+        candidates: bundles,
+        updates,
+        ignored,
+        unchecked,
+        total: updates.length + this.lastCheck.reloads.length + unchecked.length,
+      }
+    }
+    this.pruneApprovals()
     return this.snapshot()
   }
 
@@ -237,9 +321,16 @@ export class UpdaterService {
     const own = new AbortController()
     this.cancellation = own
     const signal = request.signal === undefined ? own.signal : AbortSignal.any([request.signal, own.signal])
+    const requestId = this.newRequestId(name)
+    this.beginRun()
+    this.setRunCurrent(name, this.initialStep(state.kind), requestId)
     try {
-      return await this.runItem(item, state, { signal })
+      const result = await this.runItem(item, state, { signal, requestId })
+      this.noteRunResult(name, result)
+      if (result?.outcome === 'updated' || result?.outcome === 'reloaded') await this.refreshQuietly()
+      return result
     } finally {
+      this.finishRun()
       if (this.cancellation === own) this.cancellation = undefined
     }
   }
@@ -266,6 +357,7 @@ export class UpdaterService {
     const signal = request.signal === undefined
       ? own.signal
       : AbortSignal.any([request.signal, own.signal])
+    this.beginRun()
     try {
       const outcome = await runBatch({
         items,
@@ -277,8 +369,10 @@ export class UpdaterService {
         // still queued and discards the results already produced, which is the
         // opposite of the "remaining candidates are still attempted" rule.
         run: async (item) => {
+          const requestId = this.newRequestId(item.name)
+          this.setRunCurrent(item.name, this.initialStep(item.kind), requestId)
           try {
-            return await this.runItem(item, this.candidateState(item.name), { signal })
+            return await this.runItem(item, this.candidateState(item.name), { signal, requestId })
           } catch (error) {
             return {
               outcome: 'failed',
@@ -287,13 +381,17 @@ export class UpdaterService {
             }
           }
         },
-        onResult: (name, result) => { this.emit('plugin-updater/row-state', { name, result }) },
+        onResult: (name, result) => {
+          this.noteRunResult(name, result)
+          this.emit('plugin-updater/row-state', { name, result })
+        },
       })
       if (outcome.results.some((entry) => entry.outcome === 'updated' || entry.outcome === 'reloaded')) {
-        await this.refresh()
+        await this.refreshQuietly()
       }
       return { ...outcome, skippedIgnored }
     } finally {
+      this.finishRun()
       if (this.cancellation === own) this.cancellation = undefined
     }
   }
@@ -317,11 +415,16 @@ export class UpdaterService {
    * Run one candidate's update.
    * @param {{name: string, kind: string}} item The queue item.
    * @param {object} state Its checked state.
-   * @param {{signal?: AbortSignal}} options Cancellation.
+   * @param {{signal?: AbortSignal, requestId?: string, approvedBuilds?: string[]}} options
+   *   Cancellation, the plugin manager request the steps are reported under, and
+   *   approval keys already decided on the host.
    * @returns {Promise<object>} The outcome.
    */
   async runItem(item, state, options) {
-    const announce = (phase) => { this.emit('plugin-updater/row-phase', { name: item.name, phase }) }
+    const announce = (phase) => {
+      this.noteRunStep(item.name, phase)
+      this.emit('plugin-updater/row-phase', { name: item.name, phase })
+    }
     const bundle = this.lastCheck?.candidates?.find((entry) => entry.name === item.name)
     let result
     if (item.kind === 'local') {
@@ -340,24 +443,40 @@ export class UpdaterService {
         profileDir: this.profileDir,
         host: this.pluginManager,
         signal: options.signal,
+        requestId: options.requestId,
         onPhase: announce,
         // Approval is decided against the repositories the user trusted, from
-        // the keys the failed run itself reported.
-        decideApproval: async (failure) => decideBuildApproval({
-          pendingBuilds: /** @type {{pendingBuilds?: string[]}} */ (failure.value ?? {}).pendingBuilds,
-          output: /** @type {{result?: {packageResult?: {output?: string}}}} */ (failure.value ?? {}).result?.packageResult?.output,
-          repository: parsed.repository,
-          trustedRepositories: this.config().trustedRepositories,
+        // the keys the failed run itself reported. A decision already made on
+        // the host replays those keys instead of asking again.
+        decideApproval: options.approvedBuilds === undefined
+          ? async (failure) => decideBuildApproval({
+            pendingBuilds: /** @type {{pendingBuilds?: string[]}} */ (failure.value ?? {}).pendingBuilds,
+            output: /** @type {{result?: {packageResult?: {output?: string}}}} */ (failure.value ?? {}).result?.packageResult?.output,
+            repository: parsed.repository,
+            trustedRepositories: this.config().trustedRepositories,
+          })
+          : async () => ({ decision: 'approve', keys: options.approvedBuilds }),
+        approveBuilds: (keys, spec) => this.pluginManager.installBundle(spec, {
+          approvedBuilds: keys,
+          saveExact: true,
+          enabled: true,
+          ...options.requestId === undefined ? {} : { requestId: options.requestId },
         }),
-        approveBuilds: (keys, spec) => this.pluginManager.installBundle(spec, { approvedBuilds: keys }),
       })
     } else {
       const identity = /** @type {{available?: string}} */ (state.identity ?? {})
       if (identity.available === undefined) throw new Error(`${item.name} has no target version`)
-      result = await updateRegistry({ name: item.name, version: identity.available, host: this.pluginManager, onPhase: announce })
+      result = await updateRegistry({
+        name: item.name,
+        version: identity.available,
+        host: this.pluginManager,
+        requestId: options.requestId,
+        onPhase: announce,
+      })
     }
     this.noteSpecRestore(item.name, result)
     this.noteRestart(item.name, result)
+    this.noteApproval(item, state, result)
     // The package manager's output is what the user needs when a step fails, so
     // it travels with the result rather than only into the event stream.
     const packageResult = /** @type {{result?: {packageResult?: object}, restore?: {packageResult?: object}}} */ (result)
@@ -374,6 +493,79 @@ export class UpdaterService {
     const state = this.lastCheck?.candidates?.find((entry) => entry.name === name)
     return /** @type {{installedCommit?: string}} */ (state ?? {}).installedCommit
   }
+
+  /**
+   * A request id the plugin manager carries into its progress and log events.
+   * @param {string} name Candidate name.
+   * @returns {string} A fresh id for one attempt.
+   */
+  newRequestId(name) {
+    this.runSequence += 1
+    return `updater:${name}:${this.runSequence}`
+  }
+
+  /**
+   * Start recording one queue or single attempt.
+   * @returns {void}
+   */
+  beginRun() {
+    this.run = { startedAt: Date.now(), current: undefined, results: [] }
+  }
+
+  /** @returns {void} Stop exposing the run record once the call settles. */
+  finishRun() {
+    this.run = undefined
+  }
+
+  /**
+   * Name the candidate whose attempt is currently executing.
+   * @param {string} name Candidate name.
+   * @param {string} step Initial step.
+   * @param {string} requestId The plugin manager request.
+   * @returns {void}
+   */
+  setRunCurrent(name, step, requestId) {
+    if (this.run === undefined) return
+    this.run.current = { name, step, requestId }
+  }
+
+  /**
+   * Advance the current step when the running candidate reports one.
+   * @param {string} name Candidate name.
+   * @param {string} step New step.
+   * @returns {void}
+   */
+  noteRunStep(name, step) {
+    if (this.run?.current?.name !== name) return
+    this.run.current.step = step
+  }
+
+  /**
+   * Record one settled candidate without waiting for the queue to finish.
+   * @param {string} name Candidate name.
+   * @param {object} result Outcome.
+   * @returns {void}
+   */
+  noteRunResult(name, result) {
+    if (this.run === undefined) return
+    this.run.results.push({
+      name,
+      outcome: typeof result?.outcome === 'string' ? result.outcome : 'failed',
+      ...typeof result?.reason === 'string' ? { reason: result.reason } : {},
+    })
+  }
+
+  /**
+   * The step a candidate starts on, by source.
+   * @param {unknown} kind Candidate kind.
+   * @returns {string} The step name.
+   */
+  initialStep(kind) {
+    if (kind === 'local') return 'reloading'
+    if (kind === 'git') return 'removing'
+    return 'checking'
+  }
+
 
   /**
    * The plugins whose update still needs a restart, restricted to installed ones.
@@ -439,13 +631,99 @@ export class UpdaterService {
    * @returns {void}
    */
   noteRestart(name, result) {
-    const nested = /** @type {{result?: {application?: string}, application?: string, restore?: {application?: string}}} */ (result)
-    const application = nested.result?.application ?? nested.application
+    const nested = /** @type {{result?: {result?: {application?: string}, application?: string}, application?: string, restore?: {application?: string}}} */ (result)
+    // A registry result nests the plugin manager's change under result.result.
+    const application = nested.result?.result?.application
+      ?? nested.result?.application
+      ?? nested.application
     if (application !== 'restart-required') return
     if (this.restartRequired.includes(name)) return
     this.restartRequired.push(name)
     this.emit('plugin-updater/restart-required', { name })
   }
+
+  /**
+   * Keep or drop the approval request a settled attempt produced.
+   *
+   * The keys and the target commit stay here, never in the client: approving
+   * later replays exactly what the package manager reported for this attempt.
+   * @param {{name: string, kind: string}} item The attempted candidate.
+   * @param {object} state Its checked state.
+   * @param {object} result The settled outcome.
+   * @returns {void}
+   */
+  noteApproval(item, state, result) {
+    if (item.kind !== 'git' || result?.outcome !== 'needsApproval') {
+      this.pendingApprovals.delete(item.name)
+      return
+    }
+    const bundle = this.lastCheck?.candidates?.find((entry) => entry.name === item.name)
+    const parsed = /** @type {{repository?: string}} */ (bundle?.parsed ?? {})
+    const identity = /** @type {{commit?: string}} */ (state?.identity ?? {})
+    const keys = Array.isArray(result.needsApproval)
+      ? result.needsApproval.filter((key) => typeof key === 'string' && key !== '')
+      : []
+    if (typeof parsed.repository !== 'string' || typeof identity.commit !== 'string' || keys.length === 0) {
+      this.pendingApprovals.delete(item.name)
+      return
+    }
+    this.pendingApprovals.set(item.name, {
+      name: item.name,
+      repository: parsed.repository,
+      targetCommit: identity.commit,
+      keys,
+    })
+  }
+
+  /**
+   * A detached copy of the run record.
+   *
+   * The snapshot is read repeatedly while a run executes; handing out the live
+   * record would let a consumer hold a reference that keeps changing after it
+   * read it, and would expose host state to mutation.
+   * @returns {object|undefined} The run, or undefined when none is active.
+   */
+  currentRun() {
+    if (this.run === undefined) return undefined
+    return {
+      startedAt: this.run.startedAt,
+      ...this.run.current === undefined ? {} : { current: { ...this.run.current } },
+      results: this.run.results.map((entry) => ({ ...entry })),
+    }
+  }
+
+  /**
+   * The pending approvals that still describe an installed plugin.
+   * @returns {{name: string, repository: string, keys: string[], targetCommit: string}[]}
+   *   One entry per undecided candidate.
+   */
+  currentApprovals() {
+    const installed = new Set((this.lastCheck?.candidates ?? []).map((entry) => entry.name))
+    return [...this.pendingApprovals.values()]
+      .filter((pending) => installed.has(pending.name))
+      .map((pending) => ({
+        name: pending.name,
+        repository: pending.repository,
+        keys: pending.keys,
+        targetCommit: pending.targetCommit,
+      }))
+  }
+
+  /**
+   * Drop approvals for plugins that are no longer installed.
+   *
+   * The request stays decidable after HEAD moves: the retained target is the
+   * commit the user was asked about, and installing it is still a valid
+   * decision. Only losing the plugin makes the request meaningless.
+   * @returns {void}
+   */
+  pruneApprovals() {
+    const candidates = new Set((this.lastCheck?.candidates ?? []).map((entry) => entry.name))
+    for (const name of [...this.pendingApprovals.keys()]) {
+      if (!candidates.has(name)) this.pendingApprovals.delete(name)
+    }
+  }
+
 
   /**
    * The commits the lockfile resolved, so a subsequent update knows what to
@@ -473,6 +751,95 @@ export class UpdaterService {
     await this.writeConfig(next)
     this.emit('plugin-updater/config-changed', next)
     return this.snapshot()
+  }
+
+  /**
+   * Trust the repository a candidate was installed from.
+   *
+   * The repository is read from the saved dependency spec on the host; a name
+   * from the client never becomes a trust entry. Only a git candidate can be
+   * trusted, and only for the exact host and path it names.
+   * @param {{name?: string}} [request] Candidate name.
+   * @returns {Promise<object>} The snapshot afterwards.
+   */
+  async trustRepository(request = {}) {
+    const name = typeof request.name === 'string' ? request.name : ''
+    if (name === '') throw new Error('trustRepository needs the name of an installed plugin')
+    const candidate = this.lastCheck?.candidates?.find((entry) => entry.name === name)
+    if (candidate === undefined) throw new Error(`${name} is not an installed plugin candidate`)
+    const parsed = /** @type {{kind?: string, repository?: string}} */ (candidate.parsed ?? {})
+    if (parsed.kind !== 'git' || typeof parsed.repository !== 'string') {
+      throw new Error(`${name} is not installed from a git repository`)
+    }
+    const identity = parseTrustedRepository(parsed.repository)
+    if (!identity.ok) throw new Error(`the repository of ${name} could not be read: ${identity.reason}`)
+    const config = this.config()
+    if (isTrusted(identity.repository, config.trustedRepositories)) return this.snapshot()
+    const next = mergeConfig(this.configOf(), {
+      trustedRepositories: addTrusted(config.trustedRepositories, identity.repository),
+    })
+    await this.writeConfig(next)
+    this.emit('plugin-updater/config-changed', next)
+    return this.snapshot()
+  }
+
+  /**
+   * Decide a pending build-script approval.
+   *
+   * Allow replays the retained keys and target commit; always-allow trusts the
+   * repository first; decline withdraws the request. The client supplies only
+   * the candidate and the decision, never the keys.
+   * @param {{name?: string, decision?: string}} [request] Candidate and decision.
+   * @returns {Promise<{snapshot: object, result?: object}>} The snapshot and, for
+   *   an applied decision, the outcome of the installation.
+   */
+  async decideBuild(request = {}) {
+    const name = typeof request.name === 'string' ? request.name : ''
+    const decision = request.decision
+    if (name === '') throw new Error('decideBuild needs the name of an installed plugin')
+    if (decision !== 'allow' && decision !== 'always-allow' && decision !== 'decline') {
+      throw new Error('decideBuild needs a decision of allow, always-allow, or decline')
+    }
+    const pending = this.pendingApprovals.get(name)
+    if (pending === undefined) throw new Error(`${name} has no pending build approval`)
+    if (decision === 'decline') {
+      this.pendingApprovals.delete(name)
+      return { snapshot: await this.snapshot() }
+    }
+    if (decision === 'always-allow') {
+      const config = this.config()
+      if (!isTrusted(pending.repository, config.trustedRepositories)) {
+        const next = mergeConfig(this.configOf(), {
+          trustedRepositories: addTrusted(config.trustedRepositories, pending.repository),
+        })
+        await this.writeConfig(next)
+        this.emit('plugin-updater/config-changed', next)
+      }
+    }
+    const state = this.candidateState(name)
+    const target = {
+      ...state,
+      identity: { .../** @type {{identity?: object}} */ (state).identity, commit: pending.targetCommit },
+    }
+    const own = new AbortController()
+    this.cancellation = own
+    const requestId = this.newRequestId(name)
+    this.beginRun()
+    this.setRunCurrent(name, 'installing', requestId)
+    try {
+      const result = await this.runItem({ name, kind: 'git' }, target, {
+        signal: own.signal,
+        requestId,
+        approvedBuilds: pending.keys,
+      })
+      this.noteRunResult(name, result)
+      if (result?.outcome === 'updated' || result?.outcome === 'reloaded') await this.refreshQuietly()
+      if (result?.outcome !== 'needsApproval') this.pendingApprovals.delete(name)
+      return { snapshot: await this.snapshot(), result }
+    } finally {
+      this.finishRun()
+      if (this.cancellation === own) this.cancellation = undefined
+    }
   }
 
   /**
@@ -565,6 +932,23 @@ const providesNothing = () => false
  */
 export function isTrigger(value) {
   return typeof value === 'string' && TRIGGERS.has(value)
+}
+
+/**
+ * Record the lockfile commit on every candidate.
+ *
+ * The lockfile is the only place an installed git commit appears, and an update
+ * restores to it. Missing one candidate silently downgrades its restore path to
+ * the moving spec.
+ * @param {object[]} bundles Installed bundles.
+ * @param {Map<string, string>} commits Package name to installed commit.
+ * @returns {void}
+ */
+function attachInstalledCommits(bundles, commits) {
+  for (const bundle of bundles) {
+    const commit = commits.get(bundle.name)
+    if (commit !== undefined) /** @type {Record<string, unknown>} */ (bundle).installedCommit = commit
+  }
 }
 
 /** Longest package manager excerpt a row carries, in characters. */

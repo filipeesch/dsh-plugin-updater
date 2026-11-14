@@ -23,7 +23,7 @@ The system SHALL contribute one permanent entry to the sidebar footer, rendered 
 
 ### Requirement: Expanded footer row layout
 
-In the expanded sidebar the entry SHALL show an icon, a label, a numeric count aligned to the right, and a refresh control, all on one row. Activating the icon or the label SHALL open the panel. Activating the refresh control SHALL start a detection without opening the panel.
+In the expanded sidebar the entry SHALL show an icon, a label, a numeric count aligned to the right, and a refresh control, all on one row. Activating the icon or the label SHALL open the panel. Activating the refresh control SHALL start a detection without opening the panel. A check failure SHALL be indicated by a small dot beside the count with an accessible name, not by a text label.
 
 #### Scenario: Opening the panel from the row
 - **WHEN** the user activates the icon or the label
@@ -36,6 +36,10 @@ In the expanded sidebar the entry SHALL show an icon, a label, a numeric count a
 #### Scenario: Count placement
 - **WHEN** the row renders with pending work
 - **THEN** the count appears to the right of the label, visually associated with the refresh control
+
+#### Scenario: Failure is compact
+- **WHEN** a plugin check failed
+- **THEN** the row shows a small dot beside the count instead of a sentence
 
 ### Requirement: Pending count
 
@@ -55,7 +59,7 @@ The count SHALL include plugins with an available update, plugins installed from
 
 ### Requirement: Check failure indication
 
-The entry SHALL indicate that a plugin check failed, distinctly from plugins having updates, and SHALL indicate when the displayed count is not current.
+The entry SHALL indicate that a plugin check failed, distinctly from plugins having updates, and SHALL indicate when the displayed count is not current. The failure indication SHALL expose its meaning to assistive technology and SHALL name what failed on request.
 
 #### Scenario: One check failed
 - **WHEN** a candidate could not be checked
@@ -71,7 +75,7 @@ The entry SHALL indicate that a plugin check failed, distinctly from plugins hav
 
 ### Requirement: Collapsed sidebar rendering
 
-In the collapsed sidebar the entry SHALL render as an icon bearing the count as a corner badge, and SHALL omit the label, the numeric text, and the refresh control.
+In the collapsed sidebar the entry SHALL render as an icon bearing the count as a corner badge, and SHALL omit the label, the numeric text, and the refresh control. The same entry SHALL indicate a check failure and a running update while collapsed.
 
 #### Scenario: Collapsed rendering
 - **WHEN** the sidebar is collapsed
@@ -85,9 +89,13 @@ In the collapsed sidebar the entry SHALL render as an icon bearing the count as 
 - **WHEN** the sidebar is collapsed and nothing needs attention
 - **THEN** the entry shows its icon without a badge
 
+#### Scenario: Collapsed failure
+- **WHEN** the sidebar is collapsed and a check failed
+- **THEN** the entry indicates the failure without a text label
+
 ### Requirement: Refresh progress
 
-While a detection runs, the refresh control SHALL show that a check is in progress, and the count SHALL remain unchanged rather than clearing.
+While a detection runs, the refresh control SHALL show that a check is in progress, and the count SHALL remain unchanged rather than clearing. While an update runs, the entry SHALL indicate that work is in progress even when the panel is closed.
 
 #### Scenario: Detection running
 - **WHEN** a detection is in progress
@@ -97,13 +105,17 @@ While a detection runs, the refresh control SHALL show that a check is in progre
 - **WHEN** the detection completes
 - **THEN** the refresh control stops indicating progress and the count reflects the new result
 
+#### Scenario: Update running
+- **WHEN** an update is in progress and the panel is closed
+- **THEN** the entry indicates that work is in progress and the count keeps its previous value
+
 ### Requirement: Accessibility of the entry
 
-The entry SHALL expose its label, its pending count, and any check failure to assistive technology, and the refresh control SHALL have its own accessible name.
+The entry SHALL expose its label, its pending count, its failure indication, and whether work is in progress to assistive technology, and the refresh control SHALL have its own accessible name.
 
 #### Scenario: Screen reader reads the entry
 - **WHEN** assistive technology reads the entry
-- **THEN** it announces the label and the pending count
+- **THEN** it announces the label, the pending count, and any failure or progress state
 
 #### Scenario: Screen reader reads the refresh control
 - **WHEN** assistive technology reads the refresh control

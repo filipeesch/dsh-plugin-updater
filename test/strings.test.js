@@ -106,4 +106,19 @@ describe('client strings', () => {
       assert.ok(!text.includes('<%'), `${key} still carries a template marker`)
     }
   })
+
+  it('has no locale key outside the source dictionary and the bundle metadata', () => {
+    // The locale file also carries the display metadata the host reads. Every
+    // other key must be a string the product actually owns.
+    const extra = Object.keys(flat).filter((key) => !(key in en) && !key.startsWith('meta.'))
+    assert.deepEqual(extra, [], `only in locale/en.json: ${extra.join(', ')}`)
+  })
+
+  it('looks up every string the bundle defines', () => {
+    // A key nobody looks up is dead copy: it drifts from the UI and hides
+    // whether a renamed label was actually removed.
+    const used = new Set([...bundleSource.matchAll(/\b(?:t|translate)\('([a-zA-Z.]+)'/g)].map((match) => match[1]))
+    const unused = Object.keys(en).filter((key) => !used.has(key))
+    assert.deepEqual(unused, [], `defined but never looked up: ${unused.join(', ')}`)
+  })
 })

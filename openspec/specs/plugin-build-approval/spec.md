@@ -7,10 +7,10 @@ Lets the user grant standing build-script approval to specific repositories they
 
 ### Requirement: Trust is granted per repository
 
-The system SHALL maintain a list of trusted repositories identified by their host and repository path, and SHALL NOT grant trust by account, organization, or wildcard pattern. An entry SHALL cover only the repository it names.
+The system SHALL maintain a list of trusted repositories identified by their host and repository path, and SHALL NOT grant trust by account, organization, or wildcard pattern. An entry SHALL cover only the repository it names. Trust SHALL be granted from the candidate row that names the repository, and the system SHALL NOT propose a batch of repositories for confirmation on first use.
 
 #### Scenario: Trust one repository
-- **WHEN** the user adds `github.com/owner/repo` to the trusted list
+- **WHEN** the user adds github.com/owner/repo to the trusted list
 - **THEN** trust applies to that repository and no other, including other repositories of the same owner
 
 #### Scenario: Another repository of the same owner is not trusted
@@ -20,6 +20,10 @@ The system SHALL maintain a list of trusted repositories identified by their hos
 #### Scenario: Wildcard entry is rejected
 - **WHEN** an entry would describe a pattern rather than one repository
 - **THEN** the system refuses the entry and explains that trust is per repository
+
+#### Scenario: Trust granted from the candidate row
+- **WHEN** the user activates the trust action on a candidate whose repository is not trusted
+- **THEN** exactly that repository is added to the trusted list
 
 ### Requirement: Exact approval key only
 
@@ -39,39 +43,27 @@ When a trusted repository requires a blocked build script, the system SHALL add 
 
 ### Requirement: Untrusted repository asks without stopping the batch
 
-When an untrusted repository requires a blocked build script, the system SHALL stop only that candidate, SHALL restore its previous state, and SHALL present the approval request where the user is already looking. The remaining candidates in a batch SHALL still be processed.
+When an untrusted repository requires a blocked build script, the system SHALL stop only that candidate, SHALL restore its previous state, and SHALL present the approval request on that candidate's row with actions to allow and install, to always allow the repository and install, and to decline. The remaining candidates in a batch SHALL still be processed. The request SHALL remain available after the row is rebuilt until the user decides.
 
 #### Scenario: Untrusted repository in a batch
 - **WHEN** an untrusted candidate needs build approval during a batch
 - **THEN** that candidate is restored, the request is presented, and the other candidates continue
 
 #### Scenario: Approving restores progress
-- **WHEN** the user approves the pending build script
-- **THEN** that candidate can be updated again and the approval is remembered for the exact key
+- **WHEN** the user allows the pending build script
+- **THEN** that candidate is installed with exactly the reported entries and the approval is remembered for the exact key
 
 #### Scenario: Declining leaves the plugin working
 - **WHEN** the user declines the approval
 - **THEN** the previously installed version remains in place
 
-### Requirement: First-use onboarding of the trusted list
+#### Scenario: Request survives the reload
+- **WHEN** the failed attempt returns and the row is rebuilt from the snapshot
+- **THEN** the same request is still presented and still actionable
 
-On first use the system SHALL propose, in a confirmation step, the repositories of the plugins currently installed from git, and SHALL apply nothing until the user confirms. Entries the user removes in that step SHALL NOT be trusted.
-
-#### Scenario: First use proposes installed repositories
-- **WHEN** the plugin runs for the first time and git-installed candidates exist
-- **THEN** the system presents their repositories for confirmation before any of them is trusted
-
-#### Scenario: Confirmed entries persist
-- **WHEN** the user confirms the proposal
-- **THEN** the confirmed repositories are trusted for this and later updates
-
-#### Scenario: Removed entry is not trusted
-- **WHEN** the user removes a proposed entry before confirming
-- **THEN** that repository is not trusted and later needs approval
-
-#### Scenario: No git candidates on first use
-- **WHEN** the plugin runs for the first time and no candidate is installed from git
-- **THEN** the system trusts nothing and asks for no confirmation
+#### Scenario: Always allow from the request
+- **WHEN** the user chooses to always allow the repository from the request
+- **THEN** the repository is added to the trusted list and the candidate is installed
 
 ### Requirement: Trust persists and is revocable
 
@@ -99,12 +91,36 @@ Approval granted here SHALL apply only to operations this plugin performs, and S
 
 ### Requirement: Approval is disclosed
 
-Whenever the system approves a build script automatically, it SHALL state which repository was trusted and which exact entry was added.
+Whenever the system approves a build script, automatically or after a user decision, it SHALL state which repository was trusted and which exact entry was added. The completed row SHALL keep that record available in its detail.
 
 #### Scenario: Automatic approval reported
 - **WHEN** a build script is approved automatically during an update
 - **THEN** the outcome states the repository and the exact entry that was added
 
 #### Scenario: Approval visible afterwards
-- **WHEN** the user reviews a completed update that required automatic approval
+- **WHEN** the user reviews a completed update that required approval
 - **THEN** the record of that approval remains available in the row detail
+
+#### Scenario: Decision shown in the row
+- **WHEN** the user allows an approval request
+- **THEN** the row states which entries were allowed for which repository
+
+### Requirement: Trust action on an untrusted git candidate
+
+The system SHALL offer a trust action on every candidate row whose installation source is a git repository that is not in the trusted list. Activating it SHALL add exactly that repository. The system SHALL NOT offer the action for registry or local candidates, and SHALL NOT trust anything without the action.
+
+#### Scenario: Action present on an untrusted row
+- **WHEN** a git candidate's repository is not in the trusted list
+- **THEN** its row offers the action to trust that repository
+
+#### Scenario: Nothing trusted on first run
+- **WHEN** the plugin runs for the first time with git-installed candidates
+- **THEN** no repository is trusted and no batch confirmation is presented
+
+#### Scenario: No action for a trusted row
+- **WHEN** a git candidate's repository is already trusted
+- **THEN** the row does not offer the trust action
+
+#### Scenario: No action for registry or local rows
+- **WHEN** a candidate is installed from the registry or from a local directory
+- **THEN** its row does not offer a trust action

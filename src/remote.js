@@ -242,6 +242,41 @@ const ConfigWriteRequest = z.object({
   ignoredUpdates: z.array(z.object({ name: z.string(), identity: z.string() })).optional(),
 }).strict()
 
+/** A request deciding one pending build approval. */
+const BuildDecisionRequest = z.object({
+  name: z.string().min(1),
+  decision: z.enum(['allow', 'always-allow', 'decline']),
+}).strict()
+
+/** The current attempt inside a run record. */
+const RunCurrent = z.object({
+  name: z.string(),
+  step: z.string(),
+  requestId: z.string(),
+})
+
+/** One settled candidate recorded while the queue is still running. */
+const RunResult = z.object({
+  name: z.string(),
+  outcome: z.string(),
+  reason: z.string().optional(),
+})
+
+/** The observable state of one update or queue. */
+const Run = z.object({
+  startedAt: z.number(),
+  current: RunCurrent.optional(),
+  results: z.array(RunResult),
+})
+
+/** A build approval the user still has to decide. */
+const Approval = z.object({
+  name: z.string(),
+  repository: z.string(),
+  keys: z.array(z.string()),
+  targetCommit: z.string(),
+})
+
 /** The pending-state snapshot. */
 const Snapshot = z.object({
   updates: z.array(z.any()),
@@ -254,11 +289,12 @@ const Snapshot = z.object({
   lastFailure: z.string().optional(),
   restartRequired: z.array(z.string()).optional(),
   specRestoreFailed: z.array(z.object({ name: z.string(), reason: z.string() })).optional(),
-  proposedRepositories: z.array(z.string()).optional(),
   cache: z.object({ bytes: z.number(), repositories: z.number(), limitBytes: z.number() }).optional(),
   trustedRepositories: z.array(z.string()).optional(),
   ignoredUpdates: z.array(z.object({ name: z.string(), identity: z.string() })).optional(),
   running: z.boolean().optional(),
+  run: Run.optional(),
+  approvals: z.array(Approval).optional(),
 })
 
 /** The outcome of one update. */
@@ -284,6 +320,12 @@ const BatchOutcome = z.object({
   skippedIgnored: z.number().optional(),
 })
 
+/** The result of deciding a build approval. */
+const BuildDecisionResult = z.object({
+  snapshot: Snapshot,
+  result: Outcome.optional(),
+})
+
 /** The invocation facts every method shares. */
 const base = { service: SERVICE_NAME, invocation: { kind: 'direct' } }
 
@@ -305,6 +347,17 @@ const spec = {
     },
     'pluginUpdater/cancel': {
       ...base, parameters: [parameter('request', EmptyRequest, 'EmptyRequest')], result: codec('CancelResult', () => CancelResult),
+    },
+    'pluginUpdater/recheck': {
+      ...base, parameters: [parameter('request', NameRequest, 'NameRequest')], result: codec('Snapshot', () => Snapshot),
+    },
+    'pluginUpdater/trustRepository': {
+      ...base, parameters: [parameter('request', NameRequest, 'NameRequest')], result: codec('Snapshot', () => Snapshot),
+    },
+    'pluginUpdater/decideBuild': {
+      ...base,
+      parameters: [parameter('request', BuildDecisionRequest, 'BuildDecisionRequest')],
+      result: codec('BuildDecisionResult', () => BuildDecisionResult),
     },
     'pluginUpdater/saveConfig': {
       ...base, parameters: [parameter('request', ConfigWriteRequest, 'ConfigWriteRequest')], result: codec('Snapshot', () => Snapshot),
