@@ -1,134 +1,136 @@
 {
   "meta": {
     "title": "Plugin Updater",
-    "description": "One-click updates for installed plugins, including those installed from GitHub or a local directory, with a pending count in the sidebar."
-  },
-  "entry": {
-    "label": "Plugin Updater",
-    "countAria": "{{count}} plugins need attention",
-    "countNone": "No plugin updates",
-    "refresh": "Check for plugin updates",
-    "refreshRunning": "Checking for plugin updates",
-    "checkFailed": "A plugin could not be checked",
-    "notCurrent": "Not checked since the last failure",
-    "openPanel": "Open Plugin Updater"
-  },
-  "tabs": {
-    "updates": "Updates",
-    "settings": "Settings"
-  },
-  "list": {
-    "allCurrent": "Everything is up to date.",
-    "lastChecked": "Last checked at {{time}}",
-    "unknown": "No successful check yet.",
-    "checking": "Checking…",
-    "retry": "Check again",
-    "ignoredTitle": "Ignored updates",
-    "ignoredCount": "{{count}} ignored",
-    "reviewIgnored": "Review",
-    "hideIgnored": "Hide"
-  },
-  "row": {
-    "installed": "installed",
-    "available": "available",
-    "commits": "{{count}} new commit",
-    "commits_plural": "{{count}} new commits",
-    "sourceRegistry": "npm",
-    "sourceGit": "GitHub",
-    "sourceLocal": "Local",
-    "update": "Update",
-    "reload": "Reload",
-    "reloadHint": "Files changed after the application started.",
-    "retry": "Try again",
-    "notChecked": "Not checked",
-    "ignore": "Ignore",
-    "showNotes": "Show changes",
-    "hideNotes": "Hide changes",
-    "notesNone": "No changes were found for this version.",
-    "notesUnavailable": "Changes could not be loaded: {{reason}}",
-    "notesTotal": "{{count}} commit in total",
-    "notesTotal_plural": "{{count}} commits in total",
-    "showOutput": "Show output",
-    "hideOutput": "Hide output",
-    "retryCheck": "Try again",
-    "specRestoreFailed": "The saved version could not be reset, so this plugin may stop reporting updates: {{reason}}"
-  },
-  "phase": {
-    "checking": "Checking",
-    "removing": "Removing",
-    "installing": "Installing",
-    "restoring": "Restoring the previous version",
-    "reloading": "Reloading",
-    "running": "Working",
-    "done": "Updated",
-    "updated": "Updated",
-    "reloaded": "Reloaded",
-    "failed": "Failed",
-    "cancelled": "Cancelled",
-    "restored": "Restored",
-    "needsApproval": "Needs approval",
-    "approved": "Build script approved",
-    "restoredAfterFailure": "Restored"
+    "description": "One-click updates for installed plugins, including those from GitHub or a local directory, with a pending count in the sidebar."
   },
   "actions": {
-    "updateAll": "Update all",
     "cancel": "Cancel",
-    "cancelAll": "Cancel all",
-    "close": "Close"
-  },
-  "restart": {
-    "required": "Restart DeepSeek Harness to load the updated plugins.",
-    "requiredNamed": "Restart DeepSeek Harness to load {{name}}."
-  },
-  "summary": {
-    "updated": "{{count}} updated",
-    "reloaded": "{{count}} reloaded",
-    "needsApproval": "{{count}} needs approval",
-    "failed": "{{count}} failed",
-    "restored": "{{count}} restored",
-    "skippedIgnored": "{{count}} ignored skipped",
-    "viewDetails": "View details",
-    "specRestoreFailed": "{{count}} plugin(s) may stop reporting updates because the saved version could not be reset"
-  },
-  "failure": {
-    "incompatible": "Requires DeepSeek Harness {{required}}; this installation runs {{running}}.",
-    "buildBlocked": "{{name}} needs to run a build script during installation.",
-    "network": "The plugin could not be downloaded.",
-    "restored": "The previous version was restored.",
-    "restoreFailed": "The previous version could not be restored. Reinstall {{spec}} to recover.",
-    "repositoryUnreachable": "The repository could not be read.",
-    "repositoryMissing": "The repository no longer exists."
+    "updateAll": "Update all"
   },
   "approval": {
-    "title": "Build script approval",
-    "body": "{{name}} wants to run a build script while installing from {{repository}}.",
     "allow": "Allow and install",
-    "deny": "Do not install",
-    "trustRepository": "Always allow this repository",
-    "approved": "Build script approved for {{repository}}: {{key}}"
+    "always": "Always allow {{repository}}",
+    "body": "{{name}} needs to run a build script from {{repository}}.",
+    "decline": "Not now",
+    "keys": "Entries that need approval",
+    "title": "Build script approval"
   },
-  "settings": {
-    "trustedTitle": "Trusted repositories",
-    "trustedDescription": "Build scripts are approved automatically only for these repositories. Every other repository asks first.",
-    "trustedEmpty": "No trusted repositories. Every build script asks first.",
-    "trustedAdd": "Add repository",
-    "trustedPlaceholder": "github.com/owner/repo",
-    "trustedInvalid": "Enter one repository as host/owner/repo. Trust is granted per repository, not per account.",
-    "remove": "Remove",
-    "ignoredTitle": "Ignored updates",
-    "ignoredEmpty": "No ignored updates.",
-    "ignoredClear": "Stop ignoring",
-    "cacheTitle": "Change cache",
-    "cacheUsage": "{{used}} of {{limit}} used by {{count}} repositories.",
-    "cacheClear": "Clear cache"
-  },
-  "onboarding": {
-    "title": "Trust your plugin repositories",
-    "body": "Approving a build script runs code from that repository. Trust only the repositories you installed on purpose. Nothing is trusted until you confirm.",
-    "confirm": "Trust these repositories",
-    "later": "Decide later"
+  "entry": {
+    "checkFailed": "A plugin could not be checked",
+    "countAria": "{{count}} plugins need attention",
+    "label": "Plugin Updater",
+    "notCurrent": "Not checked since the last failure",
+    "progress": "An update is running",
+    "refresh": "Check for plugin updates"
   },
   "error": {
     "generic": "Something went wrong: {{reason}}"
+  },
+  "header": {
+    "attention": "{{count}} plugins need attention",
+    "attentionOne": "1 plugin needs attention",
+    "checkFailed": "The last check failed",
+    "current": "Everything is up to date",
+    "lastChecked": "Last checked at {{time}}",
+    "notCurrent": "The last check failed: {{reason}}",
+    "notCurrentUnknown": "The last check failed",
+    "unknown": "No successful check yet"
+  },
+  "list": {
+    "allCurrent": "Everything is up to date.",
+    "checkFailed": "Check again to update the list.",
+    "checking": "Checking…",
+    "hideIgnored": "Hide",
+    "ignoredCount": "{{count}} ignored",
+    "ignoredTitle": "Ignored updates",
+    "retry": "Check again",
+    "reviewIgnored": "Review",
+    "unknown": "No successful check yet."
+  },
+  "notice": {
+    "cancelled": "{{name}} cancelled",
+    "dismiss": "Dismiss",
+    "failed": "{{name}} failed",
+    "needsApproval": "{{name}} needs build approval",
+    "reloaded": "{{name}} reloaded",
+    "restored": "{{name}} restored to the previous version",
+    "updated": "{{name}} updated"
+  },
+  "phase": {
+    "approved": "Build script approved",
+    "cancelled": "Cancelled",
+    "cancelling": "Cancelling",
+    "checking": "Checking",
+    "failed": "Failed",
+    "installing": "Installing",
+    "needsApproval": "Needs approval",
+    "queued": "Queued",
+    "reloaded": "Reloaded",
+    "reloading": "Reloading",
+    "removing": "Removing",
+    "restored": "Restored",
+    "restoring": "Restoring",
+    "running": "Working",
+    "updated": "Updated"
+  },
+  "restart": {
+    "required": "Restart DeepSeek Harness to load the updated plugins."
+  },
+  "row": {
+    "commitOne": "1 new commit",
+    "commits": "{{count}} new commits",
+    "dismiss": "Dismiss",
+    "hideNotes": "Hide changes",
+    "hideOutput": "Hide output",
+    "ignore": "Ignore",
+    "notChecked": "Not checked",
+    "notesNone": "No changes were found.",
+    "notesUnavailable": "Changes could not be loaded: {{reason}}",
+    "reload": "Reload",
+    "reloadHint": "Files changed after the application started.",
+    "retry": "Try again",
+    "showNotes": "Show changes",
+    "showOutput": "Show output",
+    "sourceGit": "GitHub",
+    "sourceLocal": "Local",
+    "sourceRegistry": "npm",
+    "specRestoreFailed": "The saved version could not be reset, so this plugin may stop reporting updates: {{reason}}",
+    "trust": "Trust this repository",
+    "update": "Update"
+  },
+  "settings": {
+    "cacheClear": "Clear cache",
+    "cacheTitle": "Change cache",
+    "cacheUsage": "{{used}} of {{limit}} used by {{count}} repositories.",
+    "ignoredClear": "Stop ignoring",
+    "ignoredEmpty": "No ignored updates.",
+    "ignoredTitle": "Ignored updates",
+    "remove": "Remove",
+    "trustedAdd": "Add repository",
+    "trustedDescription": "Build scripts are approved automatically only for these repositories. Every other repository asks first.",
+    "trustedEmpty": "No trusted repositories. Every build script asks first.",
+    "trustedInvalid": "Enter one repository as owner/repo or host/owner/repo. Trust is per repository, not per account.",
+    "trustedPlaceholder": "github.com/owner/repo",
+    "trustedTitle": "Trusted repositories",
+    "cacheDescription": "Copies of git repositories, cached so release notes load faster."
+  },
+  "summary": {
+    "cancelled": "{{count}} cancelled",
+    "failed": "{{count}} failed",
+    "needsApproval": "{{count}} needs approval",
+    "reloaded": "{{count}} reloaded",
+    "restored": "{{count}} restored",
+    "skippedIgnored": "{{count}} ignored skipped",
+    "specRestoreFailed": "{{count}} plugin(s) may stop reporting updates because the saved version could not be reset",
+    "updated": "{{count}} updated",
+    "viewDetails": "View details"
+  },
+  "tabs": {
+    "label": "Plugin Updater sections",
+    "settings": "Settings",
+    "updates": "Updates"
+  },
+  "toolbar": {
+    "checkNow": "Check now"
   }
 }

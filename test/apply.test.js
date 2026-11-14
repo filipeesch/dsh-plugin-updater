@@ -142,6 +142,22 @@ describe('updateGit', () => {
     assert.equal(await savedValue(), SAVED)
   })
 
+  it('passes the request id to every installation', async () => {
+    await writeManifest(SAVED)
+    const options = []
+    const host = {
+      async removeBundle() { return { application: 'applied' } },
+      async installBundle(spec, received) { options.push(received); return { application: 'applied' } },
+    }
+    const result = await updateGit({
+      name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host,
+      requestId: 'updater:plugin:1',
+    })
+    assert.equal(result.outcome, 'updated')
+    assert.ok(options.length > 0)
+    assert.ok(options.every((option) => option.requestId === 'updater:plugin:1'))
+  })
+
   it('restores when cancelled after removal', async () => {
     await writeManifest(SAVED)
     const controller = new AbortController()
@@ -168,6 +184,13 @@ describe('updateRegistry', () => {
     const host = { async updateBundle(name, version) { return { result: { application: 'applied' }, to: version } } }
     const result = await updateRegistry({ name: 'x', version: '1.2.3', host })
     assert.equal(result.outcome, 'updated')
+  })
+
+  it('passes the request id to the host', async () => {
+    let seen
+    const host = { async updateBundle(name, version, options) { seen = options; return { result: { application: 'applied' } } } }
+    await updateRegistry({ name: 'x', version: '1.2.3', host, requestId: 'updater:x:1' })
+    assert.deepEqual(seen, { requestId: 'updater:x:1' })
   })
 
   it('reports a host-reported failure', async () => {

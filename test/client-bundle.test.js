@@ -42,8 +42,8 @@ describe('browser bundle', () => {
     const { exports } = loadBundle()
     const face = exports.get('dsh-plugin-updater/remote')
     assert.equal(face.SERVICE_NAME, 'pluginUpdater')
-    assert.equal(face.remote.descriptors.length, 7)
-    assert.equal(face.host.invocations.length, 7)
+    assert.equal(face.remote.descriptors.length, 10)
+    assert.equal(face.host.invocations.length, 10)
   })
 
   it('registers the footer entry, the panel, and the notice when mounted', ZOD_REQUIRED, async () => {
