@@ -104,6 +104,7 @@ function harness(initial, handlers = {}, failSnapshot = false) {
     },
   }
   const clock = timers()
+  const copied = []
   const store = loadBundle().exports.get('dsh-plugin-updater').createStore({
     remote,
     layout: { selectPanel: (id) => { calls.push({ name: 'selectPanel', request: id }) } },
@@ -111,11 +112,16 @@ function harness(initial, handlers = {}, failSnapshot = false) {
     now: () => 1234,
     schedule: clock.schedule,
     cancelSchedule: clock.cancelSchedule,
+    copy: async (text) => {
+      copied.push(text)
+      if (handlers.copy !== undefined) await handlers.copy(text)
+    },
   })
   return {
     store,
     calls,
     events,
+    copied,
     timers: clock,
     setState(next) { state = next },
     count(name) { return calls.filter((entry) => entry.name === name).length },
@@ -453,5 +459,176 @@ describe('store actions', () => {
     const h = harness(baseState())
     await h.store.actions.cancel()
     assert.equal(h.count('cancel'), 1)
+  })
+})
+
+describe('store diagnosis and blocked rows', () => {
+  it('keeps the host diagnosis on the row and copies it', ZOD_REQUIRED, async () => {
+    const h = harness(baseState({ updates: [update()], total: 1 }), {
+      updateOne: async () => ({
+        outcome: 'failed',
+        reason: 'operation-error: ERR_PNPM_NO_MATCHING_VERSION',
+        failure: { code: 'operation-error', diagnostic: 'ERR_PNPM_NO_MATCHING_VERSION', restored: false },
+        output: { text: 'pnpm output tail', truncated: false },
+      }),
+    })
+    await h.store.actions.load()
+    await h.store.actions.updateOne('a')
+    const row = h.store.getSnapshot().rows[0]
+    assert.equal(row.state, 'failed')
+    assert.equal(row.failure.code, 'operation-error')
+    assert.equal(row.failure.diagnostic, 'ERR_PNPM_NO_MATCHING_VERSION')
+
+    await h.store.actions.copy('a')
+    assert.equal(h.copied.length, 1)
+    assert.match(h.copied[0], /code: operation-error/)
+    assert.match(h.copied[0], /pnpm output tail/)
+    assert.match(h.store.getSnapshot().notice.text, /row.copiedDetails/)
+  })
+
+  it('reports a clipboard failure instead of claiming a copy', ZOD_REQUIRED, async () => {
+    const h = harness(baseState({ updates: [update()], total: 1 }), {
+      updateOne: async () => ({ outcome: 'failed', failure: { code: 'operation-error', restored: false } }),
+      copy: async () => { throw new Error('permission denied') },
+    })
+    await h.store.actions.load()
+    await h.store.actions.updateOne('a')
+    await h.store.actions.copy('a')
+    const notice = h.store.getSnapshot().notice
+    assert.equal(notice.tone, 'error')
+    assert.match(notice.text, /permission denied/)
+  })
+
+  it('lists a blocked candidate without offering an action', ZOD_REQUIRED, async () => {
+    const h = harness(baseState({
+      blocked: [{ name: 'x', kind: 'registry', installed: '1.0.0', reason: 'no published version is compatible with this DeepSeek Harness' }],
+    }))
+    await h.store.actions.load()
+    const view = h.store.getSnapshot()
+    const row = view.rows.find((entry) => entry.name === 'x')
+    assert.equal(row.state, 'blocked')
+    assert.equal(row.action, 'none')
+    assert.equal(view.total, 0)
+    assert.equal(view.pending.length, 0)
+    assert.equal(view.canUpdateAll, false)
+    assert.equal(view.header.summary, 'header.current')
+  })
+
+  it('becomes actionable when a compatible version appears', ZOD_REQUIRED, async () => {
+    const h = harness(baseState({
+      blocked: [{ name: 'x', kind: 'registry', installed: '1.0.0', reason: 'no published version is compatible with this DeepSeek Harness' }],
+    }))
+    await h.store.actions.load()
+    h.setState(baseState({ updates: [update('x')], total: 1 }))
+    await h.store.actions.load({ quiet: true })
+    const view = h.store.getSnapshot()
+    const row = view.rows.find((entry) => entry.name === 'x')
+    assert.equal(row.state, 'idle')
+    assert.equal(row.action, 'update')
+    assert.equal(view.total, 1)
+  })
+})
+
+describe('store lifecycle', () => {
+  /**
+   * A promise a test resolves by hand.
+   * @returns {object} The deferred.
+   */
+  function deferred() {
+    let resolve
+    const promise = new Promise((done) => { resolve = done })
+    return { promise, resolve }
+  }
+
+  it('lets a blocked detection supersede a settled failure', ZOD_REQUIRED, async () => {
+    const h = harness(baseState({ updates: [update()], total: 1 }), {
+      updateOne: async () => ({
+        outcome: 'failed',
+        failure: { code: 'operation-error', diagnostic: 'refused', restored: false },
+      }),
+    })
+    await h.store.actions.load()
+    await h.store.actions.updateOne('a')
+    assert.equal(h.store.getSnapshot().rows[0].state, 'failed')
+
+    h.setState(baseState({
+      blocked: [{ name: 'a', kind: 'registry', installed: '1.0.0', reason: 'no published version is compatible with this DeepSeek Harness' }],
+    }))
+    await h.store.actions.load({ quiet: true })
+    const blocked = h.store.getSnapshot()
+    assert.equal(blocked.rows[0].state, 'blocked')
+    assert.equal(blocked.total, 0)
+    // The older diagnosis stays available for copying.
+    assert.equal(blocked.rows[0].failure.code, 'operation-error')
+
+    h.setState(baseState({
+      updates: [{ ...update(), identity: { kind: 'version', installed: '1.0.0', available: '3.0.0' } }],
+      total: 1,
+    }))
+    await h.store.actions.load({ quiet: true })
+    const next = h.store.getSnapshot().rows[0]
+    assert.equal(next.state, 'idle')
+    assert.equal(next.action, 'update')
+    assert.equal(next.available, '3.0.0')
+  })
+
+  it('shows output carried by a run result', ZOD_REQUIRED, async () => {
+    const gate = deferred()
+    const h = harness(baseState({ updates: [update()], total: 1 }), { updateOne: () => gate.promise })
+    await h.store.actions.load()
+    const running = h.store.actions.updateOne('a')
+    h.setState(baseState({
+      updates: [update()],
+      run: {
+        startedAt: 1,
+        results: [{
+          name: 'a',
+          outcome: 'failed',
+          failure: { code: 'operation-error', restored: false, output: { text: 'failed log', truncated: false } },
+        }],
+      },
+    }))
+    await h.timers.flush(600)
+    const row = h.store.getSnapshot().rows[0]
+    assert.equal(row.output.text, 'failed log')
+    gate.resolve({ outcome: 'updated' })
+    await running
+  })
+
+  it('keeps acting while a quiet snapshot read runs', ZOD_REQUIRED, async () => {
+    const gate = deferred()
+    const h = harness(baseState({ updates: [update()], total: 1 }), { updateOne: () => gate.promise })
+    await h.store.actions.load()
+    const running = h.store.actions.updateOne('a')
+    assert.equal(h.store.getSnapshot().busy, true)
+    await h.store.actions.load({ quiet: true })
+    assert.equal(h.store.getSnapshot().busy, true)
+    gate.resolve({ outcome: 'updated' })
+    await running
+  })
+
+  it('stops polling after disposal', ZOD_REQUIRED, async () => {
+    const gate = deferred()
+    const h = harness(baseState({ updates: [update()], total: 1 }), { updateOne: () => gate.promise })
+    await h.store.actions.load()
+    const running = h.store.actions.updateOne('a')
+    const before = h.count('snapshot')
+    h.store.dispose()
+    await h.timers.flush(600)
+    assert.equal(h.count('snapshot'), before)
+    gate.resolve({ outcome: 'updated' })
+    await running
+  })
+
+  it('confirms a copy without offering to open the panel', ZOD_REQUIRED, async () => {
+    const h = harness(baseState({ updates: [update()], total: 1 }), {
+      updateOne: async () => ({ outcome: 'failed', failure: { code: 'operation-error', restored: false } }),
+    })
+    await h.store.actions.load()
+    await h.store.actions.updateOne('a')
+    await h.store.actions.copy('a')
+    const view = h.store.getSnapshot()
+    assert.equal(view.notice.action, false)
+    assert.equal(h.count('selectPanel'), 0)
   })
 })

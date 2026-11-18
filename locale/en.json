@@ -57,7 +57,7 @@
     "updated": "{{name}} updated"
   },
   "phase": {
-    "approved": "Build script approved",
+    "blocked": "No compatible version",
     "cancelled": "Cancelled",
     "cancelling": "Cancelling",
     "checking": "Checking",
@@ -79,7 +79,10 @@
   "row": {
     "commitOne": "1 new commit",
     "commits": "{{count}} new commits",
+    "copiedDetails": "Details copied",
+    "copyDetails": "Copy details",
     "dismiss": "Dismiss",
+    "failureUntouched": "The installed version was left in place.",
     "hideNotes": "Hide changes",
     "hideOutput": "Hide output",
     "ignore": "Ignore",

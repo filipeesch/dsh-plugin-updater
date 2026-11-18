@@ -26,6 +26,7 @@ import { pendingTotal } from './version.js'
  * @returns {Promise<{
  *   states: object[],
  *   updates: object[],
+ *   blocked: object[],
  *   ignored: object[],
  *   unchecked: object[],
  *   total: number,
@@ -51,11 +52,18 @@ export async function runCheck(input) {
   }))
 
   const updates = []
+  const blocked = []
   const ignoredUpdates = []
   const unchecked = []
   for (const state of states) {
     if (state.state === 'unchecked') {
       unchecked.push(state)
+      continue
+    }
+    // Newer versions exist but none can run here. It is reported so the user
+    // knows why nothing happens, and it is not counted as pending work.
+    if (state.state === 'blocked') {
+      blocked.push(state)
       continue
     }
     if (state.state !== 'update') continue
@@ -68,6 +76,7 @@ export async function runCheck(input) {
   return {
     states,
     updates,
+    blocked,
     ignored: ignoredUpdates,
     unchecked,
     total: pendingTotal({ updates: updates.length, failed: unchecked.length }),

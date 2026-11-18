@@ -255,11 +255,22 @@ const RunCurrent = z.object({
   requestId: z.string(),
 })
 
+/** What a failed update reported: the host's code, its text, and whether the previous version is back. */
+const Failure = z.object({
+  code: z.string().optional(),
+  diagnostic: z.string().optional(),
+  output: z.object({ text: z.string(), truncated: z.boolean(), exitCode: z.number().optional() }).optional(),
+  restored: z.boolean(),
+  recovery: z.object({ code: z.string().optional(), diagnostic: z.string().optional() }).optional(),
+  reason: z.string().optional(),
+})
+
 /** One settled candidate recorded while the queue is still running. */
 const RunResult = z.object({
   name: z.string(),
   outcome: z.string(),
   reason: z.string().optional(),
+  failure: Failure.optional(),
 })
 
 /** The observable state of one update or queue. */
@@ -281,6 +292,7 @@ const Approval = z.object({
 const Snapshot = z.object({
   updates: z.array(z.any()),
   reloads: z.array(z.any()),
+  blocked: z.array(z.any()).optional(),
   unchecked: z.array(z.any()),
   ignored: z.array(z.any()),
   total: z.number(),
@@ -302,7 +314,7 @@ const Outcome = z.object({
   outcome: z.string(),
   step: z.string().optional(),
   reason: z.string().optional(),
-  approved: z.array(z.string()).optional(),
+  failure: Failure.optional(),
   needsApproval: z.array(z.string()).optional(),
   specRestoreFailed: z.string().optional(),
   output: z.object({ text: z.string(), truncated: z.boolean(), exitCode: z.number().optional() }).optional(),

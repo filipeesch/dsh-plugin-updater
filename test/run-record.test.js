@@ -88,6 +88,34 @@ describe('run record', () => {
     assert.equal(JSON.stringify((await target.snapshot()).restartRequired), JSON.stringify(['a']))
   })
 
+  it('passes the registry that answered the listing to the update', async () => {
+    let seen
+    const target = service({
+      async updateBundle(name, version, options) {
+        seen = options
+        return { result: { application: 'applied' } }
+      },
+    }, [{
+      name: 'a', kind: 'registry', installed: '1.0.0',
+      identity: { kind: 'version', installed: '1.0.0', available: '2.0.0', registry: 'https://registry.example/' },
+    }])
+    await target.updateOne({ name: 'a' })
+    assert.equal(seen.registry, 'https://registry.example/')
+  })
+
+  it('records the diagnosis of a failed candidate', async () => {
+    const target = service({
+      async updateBundle() {
+        return { result: { application: 'failed', error: { code: 'operation-error', diagnostic: 'ERR_PNPM_PEER_DEP_ISSUES' } } }
+      },
+    }, [update('a')])
+    const result = await target.updateOne({ name: 'a' })
+    assert.equal(result.outcome, 'failed')
+    assert.equal(result.failure.code, 'operation-error')
+    assert.equal(result.failure.diagnostic, 'ERR_PNPM_PEER_DEP_ISSUES')
+    assert.equal(result.failure.restored, false)
+  })
+
   it('reports one candidate before the queue finishes', async () => {
     const seen = []
     const target = service({

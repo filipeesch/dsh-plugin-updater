@@ -246,10 +246,20 @@ window.__ModuleLoader__.load({
         requestId: z.string(),
       })
 
+      const Failure = z.object({
+        code: z.string().optional(),
+        diagnostic: z.string().optional(),
+        output: z.object({ text: z.string(), truncated: z.boolean(), exitCode: z.number().optional() }).optional(),
+        restored: z.boolean(),
+        recovery: z.object({ code: z.string().optional(), diagnostic: z.string().optional() }).optional(),
+        reason: z.string().optional(),
+      })
+
       const RunResult = z.object({
         name: z.string(),
         outcome: z.string(),
         reason: z.string().optional(),
+        failure: Failure.optional(),
       })
 
       const Run = z.object({
@@ -269,6 +279,7 @@ window.__ModuleLoader__.load({
       const Snapshot = z.object({
         updates: z.array(z.any()),
         reloads: z.array(z.any()),
+        blocked: z.array(z.any()).optional(),
         unchecked: z.array(z.any()),
         ignored: z.array(z.any()),
         total: z.number(),
@@ -290,7 +301,7 @@ window.__ModuleLoader__.load({
         outcome: z.string(),
         step: z.string().optional(),
         reason: z.string().optional(),
-        approved: z.array(z.string()).optional(),
+        failure: Failure.optional(),
         needsApproval: z.array(z.string()).optional(),
         output: z.object({ text: z.string(), truncated: z.boolean(), exitCode: z.number().optional() }).optional(),
         result: z.any().optional(),
@@ -431,7 +442,7 @@ window.__ModuleLoader__.load({
       'notice.reloaded': '{{name}} reloaded',
       'notice.restored': '{{name}} restored to the previous version',
       'notice.updated': '{{name}} updated',
-      'phase.approved': 'Build script approved',
+      'phase.blocked': 'No compatible version',
       'phase.cancelled': 'Cancelled',
       'phase.cancelling': 'Cancelling',
       'phase.checking': 'Checking',
@@ -449,7 +460,10 @@ window.__ModuleLoader__.load({
       'restart.required': 'Restart DeepSeek Harness to load the updated plugins.',
       'row.commitOne': '1 new commit',
       'row.commits': '{{count}} new commits',
+      'row.copiedDetails': 'Details copied',
+      'row.copyDetails': 'Copy details',
       'row.dismiss': 'Dismiss',
+      'row.failureUntouched': 'The installed version was left in place.',
       'row.hideNotes': 'Hide changes',
       'row.hideOutput': 'Hide output',
       'row.ignore': 'Ignore',
@@ -598,6 +612,7 @@ window.__ModuleLoader__.load({
               : 'success'
         return { tone, label: outcomeLabel(outcome, translate) }
       }
+      if (row.state === 'blocked') return { tone: 'warn', label: translate('phase.blocked') }
       if (row.state === 'failed-check') return { tone: 'error', label: translate('row.notChecked') }
       return undefined
     }
@@ -644,6 +659,21 @@ window.__ModuleLoader__.load({
           trusted: false,
           state: 'idle',
           ...warn(reload.name),
+        })
+      }
+      // Newer versions exist but none can run here: the row explains that
+      // instead of offering an action the host always refuses.
+      for (const blocked of state.blocked ?? []) {
+        rows.push({
+          name: blocked.name,
+          kind: blocked.kind,
+          action: 'none',
+          installed: blocked.installed,
+          repository: blocked.repository,
+          trusted: isTrusted(blocked.repository),
+          reason: blocked.reason,
+          state: 'blocked',
+          ...warn(blocked.name),
         })
       }
       for (const failed of state.unchecked ?? []) {
@@ -725,7 +755,10 @@ window.__ModuleLoader__.load({
     function mergeRow(row, attempt, approvals) {
       const approval = approvals.find((entry) => entry.name === row.name)
       if (attempt === undefined) {
-        return { ...row, approval, state: row.state === 'failed-check' ? 'failed-check' : 'idle' }
+        // A blocked or failed-check row describes the detection itself, not an
+        // attempt, so it keeps its state instead of becoming actionable.
+        const keep = row.state === 'failed-check' || row.state === 'blocked'
+        return { ...row, approval, state: keep ? row.state : 'idle' }
       }
       const identity = attempt.row === undefined ? row : { ...row, ...attempt.row }
       if (attempt.state === 'running') {
@@ -741,6 +774,22 @@ window.__ModuleLoader__.load({
       if (attempt.state === 'queued') {
         return { ...identity, state: 'queued', approval }
       }
+      // A detection result that is not an action supersedes the settled attempt:
+      // the attempt describes a target that is no longer the offered one, and
+      // keeping it would hide the reason nothing is installable.
+      if (row.state === 'blocked' || row.state === 'failed-check') {
+        return {
+          ...row,
+          state: row.state,
+          approval,
+          failure: attempt.failure ?? row.failure,
+          output: attempt.output,
+        }
+      }
+      if ((row.action === 'update' || row.action === 'reload')
+        && attempt.row !== undefined && identityOf(attempt.row) !== identityOf(row)) {
+        return { ...row, state: 'idle', approval }
+      }
       return {
         ...identity,
         state: attempt.state === 'failed' ? 'failed' : 'settled',
@@ -748,10 +797,84 @@ window.__ModuleLoader__.load({
         reason: attempt.reason === undefined ? row.reason : attempt.reason,
         output: attempt.output,
         needsApproval: attempt.needsApproval,
-        approved: attempt.approved,
+        failure: attempt.failure ?? row.failure,
         approval,
         specRestoreFailed: attempt.specRestoreFailed === undefined ? row.specRestoreFailed : attempt.specRestoreFailed,
       }
+    }
+
+    /**
+     * The one-line reason a row shows, preferring what the host reported.
+     * @param {object} row Row model.
+     * @returns {string|undefined} The line.
+     */
+    function diagnosisLine(row) {
+      const failure = row.failure ?? {}
+      const parts = []
+      if (typeof failure.code === 'string' && typeof failure.diagnostic === 'string') {
+        parts.push(failure.code + ': ' + failure.diagnostic)
+      } else if (typeof failure.diagnostic === 'string') {
+        parts.push(failure.diagnostic)
+      } else if (typeof failure.code === 'string') {
+        parts.push(failure.code)
+      }
+      if (failure.recovery !== undefined) {
+        const recovery = [failure.recovery.code, failure.recovery.diagnostic].filter((part) => typeof part === 'string' && part !== '')
+        parts.push('reinstall failed' + (recovery.length === 0 ? '' : ': ' + recovery.join(': ')))
+      }
+      if (parts.length > 0) return parts.join(' \u00b7 ')
+      return typeof row.reason === 'string' ? row.reason : undefined
+    }
+
+    /**
+     * Whether a row has anything worth copying.
+     * @param {object} row Row model.
+     * @returns {boolean} True for a failed or restored row.
+     */
+    function hasDiagnosis(row) {
+      return row.failure !== undefined || row.state === 'failed' || row.outcome === 'restored'
+    }
+
+    /**
+     * The text the copy action puts on the clipboard.
+     *
+     * Plain ASCII on purpose: it is pasted into a chat or an issue tracker, so
+     * every line is labelled and nothing depends on the panel's strings.
+     * @param {object} row Row model.
+     * @returns {string} The text.
+     */
+    function diagnosisText(row) {
+      const failure = row.failure ?? {}
+      const lines = [
+        'Plugin Updater update details',
+        'plugin: ' + String(row.name ?? 'unknown'),
+        'source: ' + String(row.kind ?? 'unknown'),
+      ]
+      if (row.installed !== undefined) lines.push('installed: ' + String(row.installed))
+      if (row.available !== undefined) lines.push('target: ' + String(row.available))
+      if (typeof row.commit === 'string' && row.commit !== '') lines.push('target commit: ' + row.commit)
+      if (row.state !== undefined || row.outcome !== undefined) {
+        lines.push('outcome: ' + String(row.outcome ?? row.state))
+      }
+      if (typeof failure.code === 'string') lines.push('code: ' + failure.code)
+      if (typeof failure.diagnostic === 'string') lines.push('diagnostic: ' + failure.diagnostic)
+      if (failure.restored !== undefined) lines.push('restored: ' + (failure.restored ? 'yes' : 'no'))
+      if (failure.recovery !== undefined) {
+        const recovery = [failure.recovery.code, failure.recovery.diagnostic].filter((part) => typeof part === 'string' && part !== '')
+        lines.push('recovery: reinstall failed' + (recovery.length === 0 ? '' : ': ' + recovery.join(': ')))
+      }
+      // The outcome's own reason is where the recovery names the spec to
+      // reinstall, so it is preferred over the composed line; it is skipped when
+      // it only repeats the code and diagnostic above.
+      const cause = [failure.code, failure.diagnostic].filter((part) => typeof part === 'string' && part !== '').join(': ')
+      const reason = typeof failure.reason === 'string' && failure.reason !== '' ? failure.reason : diagnosisLine(row)
+      if (reason !== undefined && reason !== cause) lines.push('reason: ' + reason)
+      const text = row.output?.text
+      if (typeof text === 'string' && text !== '') {
+        lines.push('output:')
+        lines.push(text)
+      }
+      return lines.join('\n')
     }
 
     /**
@@ -841,196 +964,47 @@ window.__ModuleLoader__.load({
      *   layout: object,
      *   translate?: (key: string, vars?: object) => string,
      *   schedule?: (fn: () => void, ms: number) => unknown,
-     *   cancelSchedule?: (id: unknown) => void
+     *   cancelSchedule?: (id: unknown) => void,
+     *   copy?: (text: string) => Promise<void>
      * }} deps Client services and test seams.
      * @returns {object} The store.
      */
-    function createStore(deps) {
-      const remoteService = deps.remote
-      const layout = deps.layout
-      const translate = deps.translate ?? t
-      const schedule = deps.schedule ?? ((fn, ms) => setTimeout(fn, ms))
-      const cancelSchedule = deps.cancelSchedule ?? ((id) => clearTimeout(id))
+    /**
+     * The step a candidate starts on, by source.
+     * @param {{kind?: string}} row Row model.
+     * @returns {string} The step name.
+     */
+    function initialStep(row) {
+      if (row.kind === 'local') return 'reloading'
+      if (row.kind === 'git') return 'installing'
+      return 'checking'
+    }
 
-      const listeners = new Set()
+    /**
+     * The attempt layer: what is running, what it streamed, and what settled.
+     *
+     * It owns every fact about one candidate's attempt, including the buffered
+     * output, so the store and the view never reach into it.
+     * @param {{
+     *   translate: (key: string, vars?: object) => string,
+     *   publish: () => void,
+     *   schedule: (fn: () => void, ms: number) => unknown,
+     *   cancelSchedule: (id: unknown) => void,
+     *   baseRows: () => object[],
+     *   currentRun: () => object|undefined
+     * }} deps Injected services.
+     * @returns {object} The attempt layer.
+     */
+    function createAttempts(deps) {
+      const { translate, publish, schedule, cancelSchedule } = deps
+      const attempts = {}
+      const dismissed = {}
+      const rowCache = {}
       const requestNames = Object.create(null)
       const bufferedLogs = Object.create(null)
-      const disposers = []
-      let disposed = false
-      let base = emptyBase()
-      let session = emptySession()
-      let phase = 'idle'
-      let busy = false
-      let noticeSequence = 0
-      let changeTimer
-      let pollTimer
+      let batch = false
+      let announcement = ''
       let logTimer
-      let view = buildView()
-
-      /** @returns {object} The base layer of the panel state. */
-      function emptyBase() {
-        return {
-          rows: [], ignored: [], total: 0, checkedAt: undefined, current: undefined,
-          lastFailure: undefined, restartRequired: [], specRestoreFailed: [], cache: undefined,
-          trustedRepositories: [], ignoredUpdates: [], run: undefined, approvals: [], running: false,
-        }
-      }
-
-      /** @returns {object} The session layer of the panel state. */
-      function emptySession() {
-        return {
-          attempts: {}, dismissed: {}, rowCache: {}, batch: false,
-          notice: undefined, error: undefined, announcement: '',
-        }
-      }
-
-      /** @returns {object} The immutable view components render. */
-      function buildView() {
-        const rows = rowsOf(base.rows, session, base.approvals ?? [], phase)
-        const pending = rows.filter((row) => (row.action === 'update' || row.action === 'reload')
-          && row.state === 'idle' && row.approval === undefined)
-        // The total follows the rows the user can actually see. A settled row
-        // still counts unless its update or reload actually applied; a
-        // dismissed row is gone from the list and from the count.
-        const total = rows.filter((row) => {
-          if (row.state === 'idle' || row.state === 'failed-check' || row.state === 'queued' || row.state === 'running') return true
-          if (row.state !== 'settled' && row.state !== 'failed') return false
-          return row.outcome !== 'updated' && row.outcome !== 'reloaded'
-        }).length
-        return {
-          phase,
-          busy,
-          rows,
-          pending,
-          total,
-          checkedAt: base.checkedAt,
-          current: base.current,
-          lastFailure: base.lastFailure,
-          restartRequired: base.restartRequired ?? [],
-          ignored: base.ignored ?? [],
-          ignoredUpdates: base.ignoredUpdates ?? [],
-          trustedRepositories: base.trustedRepositories ?? [],
-          cache: base.cache,
-          notice: session.notice,
-          error: session.error,
-          announcement: session.announcement,
-          header: headerOf({ ...base, total }, translate),
-          canUpdateAll: pending.length > 0 && phase !== 'updating' && busy !== true,
-          updating: phase === 'updating',
-          checking: phase === 'checking' || base.running === true,
-        }
-      }
-
-      /** @returns {void} Notify every subscriber with a fresh view. */
-      function publish() {
-        if (disposed) return
-        view = buildView()
-        for (const listener of listeners) listener()
-      }
-
-      /**
-       * Replace the base layer from one host snapshot.
-       * @param {object} state Snapshot.
-       * @returns {void}
-       */
-      function adopt(state) {
-        base = {
-          rows: rowsFromSnapshot(state),
-          ignored: state.ignored ?? [],
-          total: state.total ?? 0,
-          checkedAt: state.checkedAt,
-          current: state.current,
-          lastFailure: state.lastFailure,
-          restartRequired: state.restartRequired ?? [],
-          specRestoreFailed: state.specRestoreFailed ?? [],
-          cache: state.cache,
-          trustedRepositories: state.trustedRepositories ?? [],
-          ignoredUpdates: state.ignoredUpdates ?? [],
-          run: state.run,
-          approvals: state.approvals ?? [],
-          running: state.running === true,
-        }
-        publish()
-      }
-
-      /**
-       * Unwrap the host's result envelope.
-       * @param {unknown} result Host result.
-       * @returns {unknown} The value.
-       */
-      function unwrap(result) {
-        if (result !== null && typeof result === 'object' && 'ok' in result) {
-          if (result.ok === true) return result.value
-          throw new Error(result.error?.message ?? 'the host refused the call')
-        }
-        return result
-      }
-
-      /**
-       * Call one host method, keeping failures in the session layer.
-       * @param {string} name Method name.
-       * @param {object} [request] Request.
-       * @param {{quiet?: boolean}} [options] Whether a failure stays silent.
-       * @returns {Promise<unknown>} The value, or undefined on failure.
-       */
-      async function call(name, request, options = {}) {
-        try {
-          const fn = remoteService.pluginUpdater === undefined ? undefined : remoteService.pluginUpdater[name]
-          if (typeof fn !== 'function') throw new Error('the host does not expose ' + name)
-          const result = unwrap(await fn(request ?? {}))
-          if (options.quiet !== true) session.error = undefined
-          return result
-        } catch (error) {
-          if (options.quiet !== true) {
-            session.error = translate('error.generic', {
-              reason: error instanceof Error ? error.message : String(error),
-            })
-            publish()
-          }
-          return undefined
-        }
-      }
-
-      /** @returns {void} Drop every settled row. */
-      function clearSettled() {
-        for (const [name, attempt] of Object.entries(session.attempts)) {
-          if (attempt.state === 'settled' || attempt.state === 'failed') delete session.attempts[name]
-        }
-        session.dismissed = {}
-      }
-
-      /**
-       * Read the current snapshot without starting detection.
-       * @param {{quiet?: boolean}} [options] Whether progress is shown.
-       * @returns {Promise<void>}
-       */
-      async function load(options = {}) {
-        if (options.quiet !== true) {
-          busy = true
-          if (base.checkedAt === undefined && base.rows.length === 0 && phase === 'idle') phase = 'loading'
-          publish()
-        }
-        const state = await call('snapshot', undefined, options)
-        if (state !== undefined) adopt(state)
-        busy = false
-        if (phase === 'loading') phase = 'idle'
-        publish()
-        if (shouldPoll()) schedulePoll()
-      }
-
-      /** @returns {Promise<void>} Start a manual detection and clear settled rows. */
-      async function refresh() {
-        clearSettled()
-        phase = 'checking'
-        busy = true
-        session.error = undefined
-        publish()
-        const state = await call('refresh')
-        if (state !== undefined) adopt(state)
-        phase = 'idle'
-        busy = false
-        publish()
-      }
 
       /**
        * Build a running attempt from a row.
@@ -1071,308 +1045,29 @@ window.__ModuleLoader__.load({
        * @param {object} result Outcome.
        * @returns {void}
        */
-      function settleAttempt(name, result) {
-        const attempt = session.attempts[name]
-        const baseRow = base.rows.find((row) => row.name === name)
+      function settle(name, result) {
+        const attempt = attempts[name]
+        const baseRow = deps.baseRows().find((row) => row.name === name)
         const source = attempt ?? {
-          row: baseRow === undefined ? session.rowCache[name] : cloneRow(baseRow),
+          row: baseRow === undefined ? rowCache[name] : cloneRow(baseRow),
           needsApproval: undefined,
-          approved: undefined,
         }
         const outcome = typeof result?.outcome === 'string' ? result.outcome : 'failed'
         if (typeof attempt?.requestId === 'string') delete requestNames[attempt.requestId]
-        session.attempts[name] = {
+        attempts[name] = {
           ...source,
           state: outcome === 'failed' ? 'failed' : 'settled',
           outcome,
           step: undefined,
           reason: typeof result?.reason === 'string' ? result.reason : undefined,
           needsApproval: Array.isArray(result?.needsApproval) ? result.needsApproval : source.needsApproval,
-          approved: Array.isArray(result?.approved) ? result.approved : source.approved,
+          failure: typeof result?.failure === 'object' && result.failure !== null ? result.failure : source.failure,
           specRestoreFailed: result?.specRestoreFailed,
-          output: normalizeOutput(result?.output, attempt?.output),
+          // A run record carries the output inside the failure on paths where
+          // only the diagnosis was recorded; either shape fills the row.
+          output: normalizeOutput(result?.output ?? result?.failure?.output, attempt?.output),
         }
-        session.announcement = name + ': ' + outcomeLabel(outcome, translate)
-      }
-
-      /**
-       * The initial step for a row's source.
-       * @param {object} row Row model.
-       * @returns {string} The step name.
-       */
-      function initialStep(row) {
-        if (row.kind === 'local') return 'reloading'
-        if (row.kind === 'git') return 'removing'
-        return 'checking'
-      }
-
-      /**
-       * Build the notice for one settled candidate.
-       * @param {string} name Candidate name.
-       * @param {object} result Outcome.
-       * @returns {object} The notice.
-       */
-      function noticeFor(name, result) {
-        const outcome = typeof result?.outcome === 'string' ? result.outcome : 'failed'
-        const tone = outcome === 'failed'
-          ? 'error'
-          : outcome === 'needsApproval' || outcome === 'restored'
-            ? 'warning'
-            : outcome === 'cancelled'
-              ? 'info'
-              : 'success'
-        const text = outcome === 'updated'
-          ? translate('notice.updated', { name })
-          : outcome === 'reloaded'
-            ? translate('notice.reloaded', { name })
-            : outcome === 'needsApproval'
-              ? translate('notice.needsApproval', { name })
-              : outcome === 'restored'
-                ? translate('notice.restored', { name })
-                : outcome === 'cancelled'
-                  ? translate('notice.cancelled', { name })
-                  : translate('notice.failed', { name })
-        const application = result?.result?.result?.application
-          ?? result?.result?.application
-          ?? result?.application
-        return {
-          id: ++noticeSequence,
-          tone,
-          text,
-          detail: typeof result?.reason === 'string' ? result.reason : undefined,
-          restart: application === 'restart-required',
-        }
-      }
-
-      /**
-       * Build the notice for a finished queue.
-       * @param {object} result Queue outcome.
-       * @returns {object} The notice.
-       */
-      function batchNotice(result) {
-        const entries = (result?.results ?? []).map((entry) => ({
-          outcome: entry.outcome,
-          ...(entry.result ?? {}),
-        }))
-        const text = summaryNoticeOf(entries, result?.skippedIgnored ?? 0, translate)
-        const failed = entries.some((entry) => entry.outcome === 'failed')
-        const needs = entries.some((entry) => entry.outcome === 'needsApproval' || entry.outcome === 'restored')
-        const cancelled = result?.cancelled === true || entries.some((entry) => entry.outcome === 'cancelled')
-        const restart = (result?.results ?? []).some((entry) => {
-          const outcome = entry.result ?? {}
-          const application = outcome.result?.result?.application
-            ?? outcome.result?.application
-            ?? outcome.application
-          return application === 'restart-required'
-        })
-        const tone = failed ? 'error' : needs ? 'warning' : cancelled ? 'info' : 'success'
-        return {
-          id: ++noticeSequence,
-          tone,
-          text: text ?? translate('phase.cancelled'),
-          restart,
-        }
-      }
-
-      /**
-       * Update one candidate.
-       * @param {string} name Candidate name.
-       * @returns {Promise<void>}
-       */
-      async function updateOne(name) {
-        const row = base.rows.find((entry) => entry.name === name)
-        if (row === undefined) return
-        const step = initialStep(row)
-        clearBufferedLogs()
-        session.rowCache[name] = cloneRow(row)
-        session.attempts[name] = runningAttempt(row, step)
-        session.error = undefined
-        session.announcement = name + ': ' + stepLabel(step, translate)
-        phase = 'updating'
-        busy = true
-        publish()
-        schedulePoll()
-        const result = await call('updateOne', { name })
-        const outcome = result ?? { outcome: 'failed', reason: session.error }
-        settleAttempt(name, outcome)
-        session.notice = noticeFor(name, outcome)
-        phase = 'idle'
-        busy = false
-        stopPolling()
-        publish()
-        await load({ quiet: true })
-      }
-
-      /**
-       * Update every pending candidate through the host queue.
-       * @returns {Promise<void>}
-       */
-      async function updateAll() {
-        if (phase === 'updating') return
-        clearBufferedLogs()
-        for (const row of base.rows) {
-          if (row.action !== 'retry') session.rowCache[row.name] = cloneRow(row)
-        }
-        session.batch = true
-        session.error = undefined
-        phase = 'updating'
-        busy = true
-        publish()
-        schedulePoll()
-        const result = await call('updateAll')
-        if (result !== undefined) {
-          for (const entry of result.results ?? []) {
-            settleAttempt(entry.name, entry.result ?? { outcome: entry.outcome })
-          }
-          session.notice = batchNotice(result)
-        } else {
-          // The queue failed before reporting: no candidate it had started may
-          // stay "running" forever.
-          for (const [name, attempt] of Object.entries(session.attempts)) {
-            if (attempt.state === 'running') settleAttempt(name, { outcome: 'failed', reason: session.error })
-          }
-          session.notice = {
-            id: ++noticeSequence,
-            tone: 'error',
-            text: session.error ?? translate('phase.failed'),
-          }
-        }
-        session.batch = false
-        phase = 'idle'
-        busy = false
-        stopPolling()
-        publish()
-        await load({ quiet: true })
-      }
-
-      /**
-       * Re-check one failed candidate.
-       * @param {string} name Candidate name.
-       * @returns {Promise<void>}
-       */
-      async function recheck(name) {
-        const row = base.rows.find((entry) => entry.name === name)
-        if (row === undefined) return
-        session.attempts[name] = runningAttempt(row, 'checking')
-        session.error = undefined
-        phase = 'checking'
-        busy = true
-        publish()
-        const state = await call('recheck', { name })
-        if (state !== undefined) adopt(state)
-        delete session.attempts[name]
-        phase = 'idle'
-        busy = false
-        publish()
-      }
-
-      /**
-       * Trust the repository a candidate was installed from.
-       * @param {string} name Candidate name.
-       * @returns {Promise<void>}
-       */
-      async function trust(name) {
-        busy = true
-        publish()
-        const state = await call('trustRepository', { name })
-        if (state !== undefined) adopt(state)
-        busy = false
-        publish()
-      }
-
-      /**
-       * Decide a pending build approval.
-       * @param {string} name Candidate name.
-       * @param {string} decision allow, always-allow, or decline.
-       * @returns {Promise<void>}
-       */
-      async function decideBuild(name, decision) {
-        const row = base.rows.find((entry) => entry.name === name) ?? session.rowCache[name]
-        clearBufferedLogs()
-        if (row !== undefined) session.attempts[name] = runningAttempt(row, 'installing')
-        session.error = undefined
-        phase = 'updating'
-        busy = true
-        publish()
-        schedulePoll()
-        const answer = await call('decideBuild', { name, decision })
-        if (answer !== undefined && answer.snapshot !== undefined) adopt(answer.snapshot)
-        if (answer !== undefined && answer.result !== undefined) {
-          settleAttempt(name, answer.result)
-          session.notice = noticeFor(name, answer.result)
-        } else {
-          delete session.attempts[name]
-        }
-        phase = 'idle'
-        busy = false
-        stopPolling()
-        publish()
-        if (answer !== undefined && answer.result !== undefined) await load({ quiet: true })
-      }
-
-      /**
-       * Save a configuration patch and adopt the returned snapshot.
-       * @param {object} patch Partial configuration.
-       * @returns {Promise<void>}
-       */
-      async function saveConfig(patch) {
-        const state = await call('saveConfig', patch)
-        if (state !== undefined) adopt(state)
-      }
-
-      /**
-       * Ignore the update a row offers.
-       * @param {object} row Row model.
-       * @returns {Promise<void>}
-       */
-      async function ignore(row) {
-        // A git update is identified by its commit, a registry one by its
-        // version: several commits can share a version, and ignoring by
-        // version would hide a later, different commit.
-        const identity = row.kind === 'git' ? row.commit : row.available
-        if (identity === undefined) return
-        const kept = (base.ignoredUpdates ?? []).filter((entry) => entry.name !== row.name)
-        await saveConfig({ ignoredUpdates: [...kept, { name: row.name, identity: String(identity) }] })
-      }
-
-      /** @returns {Promise<void>} Clear the clone cache. */
-      async function clearCache() {
-        const state = await call('clearCache')
-        if (state !== undefined) adopt(state)
-      }
-
-      /** @returns {Promise<void>} Abandon a running queue. */
-      async function cancel() {
-        await call('cancel')
-      }
-
-      /**
-       * Remove one settled row from the panel.
-       * @param {string} name Candidate name.
-       * @returns {void}
-       */
-      function dismiss(name) {
-        // The approval is still the user's to decide; hiding the row would
-        // leave the host holding a request with no way back to it.
-        if ((base.approvals ?? []).some((approval) => approval.name === name)) return
-        const row = base.rows.find((entry) => entry.name === name)
-          ?? session.attempts[name]?.row
-          ?? session.rowCache[name]
-        delete session.attempts[name]
-        session.dismissed[name] = identityOf(row)
-        publish()
-      }
-
-      /** @returns {void} Dismiss the current notice. */
-      function dismissNotice() {
-        session.notice = undefined
-        publish()
-      }
-
-      /** @returns {void} Open the panel and read the current snapshot. */
-      function openPanel() {
-        layout.selectPanel(PANEL_ID)
-        void load()
+        announcement = name + ': ' + outcomeLabel(outcome, translate)
       }
 
       /**
@@ -1383,15 +1078,16 @@ window.__ModuleLoader__.load({
       function nameOfRequest(requestId) {
         if (typeof requestId !== 'string') return undefined
         if (requestNames[requestId] !== undefined) return requestNames[requestId]
-        for (const [name, attempt] of Object.entries(session.attempts)) {
+        for (const [name, attempt] of Object.entries(attempts)) {
           if (attempt.requestId === requestId) return name
         }
-        if (base.run?.current?.requestId === requestId) return base.run.current.name
+        const run = deps.currentRun()
+        if (run?.current?.requestId === requestId) return run.current.name
         return undefined
       }
 
       /**
-       * Merge the host run record into the session.
+       * Merge the host run record into the attempts.
        * @param {object|undefined} run Run record.
        * @returns {void}
        */
@@ -1401,13 +1097,13 @@ window.__ModuleLoader__.load({
           const name = run.current.name
           const requestId = run.current.requestId
           if (typeof requestId === 'string') requestNames[requestId] = name
-          let attempt = session.attempts[name]
+          let attempt = attempts[name]
           if (attempt === undefined || attempt.state === 'queued') {
-            const row = base.rows.find((entry) => entry.name === name)
-              ?? session.rowCache[name]
+            const row = deps.baseRows().find((entry) => entry.name === name)
+              ?? rowCache[name]
               ?? { name, kind: 'unknown', action: 'update', state: 'idle', trusted: false }
             attempt = runningAttempt(row, run.current.step)
-            session.attempts[name] = attempt
+            attempts[name] = attempt
           }
           if (attempt.state === 'running') {
             attempt.step = run.current.step
@@ -1416,9 +1112,9 @@ window.__ModuleLoader__.load({
           if (typeof requestId === 'string') flushLogs(requestId, name)
         }
         for (const result of run.results ?? []) {
-          const attempt = session.attempts[result.name]
+          const attempt = attempts[result.name]
           if (attempt !== undefined && (attempt.state === 'settled' || attempt.state === 'failed')) continue
-          settleAttempt(result.name, { outcome: result.outcome, reason: result.reason })
+          settle(result.name, { outcome: result.outcome, reason: result.reason, failure: result.failure })
         }
         publish()
       }
@@ -1432,11 +1128,11 @@ window.__ModuleLoader__.load({
         if (progress === undefined || progress === null) return
         const name = nameOfRequest(progress.requestId)
         if (name === undefined) return
-        const attempt = session.attempts[name]
+        const attempt = attempts[name]
         if (attempt === undefined || attempt.state !== 'running') return
         if (typeof progress.step !== 'string') return
         attempt.step = progress.step
-        session.announcement = name + ': ' + stepLabel(progress.step, translate)
+        announcement = name + ': ' + stepLabel(progress.step, translate)
         publish()
       }
 
@@ -1492,7 +1188,7 @@ window.__ModuleLoader__.load({
        * @returns {void}
        */
       function appendLog(name, text) {
-        const attempt = session.attempts[name]
+        const attempt = attempts[name]
         if (attempt === undefined || attempt.state !== 'running') return
         const existing = attempt.output?.text ?? ''
         const combined = existing + text
@@ -1503,7 +1199,6 @@ window.__ModuleLoader__.load({
         if (logTimer === undefined) {
           logTimer = schedule(() => {
             logTimer = undefined
-            if (disposed) return
             publish()
           }, LOG_FLUSH_MS)
         }
@@ -1512,58 +1207,219 @@ window.__ModuleLoader__.load({
       /**
        * Apply one install-log event.
        * @param {{requestId?: string, text?: string}} chunk Event payload.
+       * @param {boolean} updating Whether an update is running.
        * @returns {void}
        */
-      function onLog(chunk) {
+      function onLog(chunk, updating) {
         if (chunk === undefined || chunk === null) return
         if (typeof chunk.requestId !== 'string' || typeof chunk.text !== 'string' || chunk.text === '') return
         const name = nameOfRequest(chunk.requestId)
         if (name === undefined) {
           // Another operation's installation is not this panel's to render.
-          if (phase === 'updating') bufferLog(chunk.requestId, chunk.text)
+          if (updating) bufferLog(chunk.requestId, chunk.text)
           return
         }
         appendLog(name, chunk.text)
       }
 
-      /** @returns {void} Debounce a manager change into a snapshot read. */
-      function scheduleChange() {
-        if (changeTimer !== undefined) cancelSchedule(changeTimer)
-        changeTimer = schedule(() => {
-          changeTimer = undefined
-          void load({ quiet: true })
-        }, CHANGE_DEBOUNCE_MS)
+      /** @returns {void} Drop every settled row. */
+      function clearSettled() {
+        for (const [name, attempt] of Object.entries(attempts)) {
+          if (attempt.state === 'settled' || attempt.state === 'failed') delete attempts[name]
+        }
+        for (const name of Object.keys(dismissed)) delete dismissed[name]
       }
 
-      /** @returns {boolean} Whether the snapshot must keep being polled. */
-      function shouldPoll() {
-        if (phase === 'updating') return true
-        if (base.running === true) return true
-        if (base.run !== undefined) return true
-        return Object.values(session.attempts).some((attempt) => attempt.state === 'running')
+      /**
+       * Remove one attempt, e.g. a check that is not an update.
+       * @param {string} name Candidate name.
+       * @returns {void}
+       */
+      function forget(name) {
+        delete attempts[name]
       }
 
-      /** @returns {void} Read the snapshot repeatedly while work is running. */
-      function schedulePoll() {
-        if (pollTimer !== undefined || disposed) return
-        pollTimer = schedule(async () => {
-          pollTimer = undefined
-          if (disposed) return
-          const state = await call('snapshot', undefined, { quiet: true })
-          if (state !== undefined) {
-            adopt(state)
-            mergeRun(state.run)
-          }
-          if (shouldPoll()) schedulePoll()
-        }, POLL_MS)
+      /**
+       * Remember a row's facts before the attempt replaces it in the snapshot.
+       * @param {string} name Candidate name.
+       * @param {object} row Row model.
+       * @returns {void}
+       */
+      function cache(name, row) {
+        rowCache[name] = cloneRow(row)
       }
 
-      /** @returns {void} Stop polling. */
-      function stopPolling() {
-        if (pollTimer === undefined) return
-        cancelSchedule(pollTimer)
-        pollTimer = undefined
+      /**
+       * Dismiss one settled row.
+       * @param {string} name Candidate name.
+       * @param {object|undefined} row Row facts.
+       * @returns {void}
+       */
+      function dismiss(name, row) {
+        delete attempts[name]
+        dismissed[name] = identityOf(row)
+        publish()
       }
+
+      return {
+        /** @returns {object} The attempts held by name. */
+        attempts: () => attempts,
+        /** @returns {object} The dismissed identities by name. */
+        dismissed: () => dismissed,
+        /** @returns {object} The cached rows by name. */
+        rowCache: () => rowCache,
+        /** @returns {boolean} Whether a batch is running. */
+        batch: () => batch,
+        /** @param {boolean} value Whether a batch is running. @returns {void} */
+        setBatch: (value) => { batch = value },
+        /** @returns {string} The current announcement. */
+        announcement: () => announcement,
+        /** @param {string} text The next announcement. @returns {void} */
+        announce: (text) => { announcement = text },
+        runningAttempt,
+        settle,
+        mergeRun,
+        onStep,
+        onInstallState,
+        onLog,
+        clearBufferedLogs,
+        clearSettled,
+        forget,
+        cache,
+        dismiss,
+        dispose() {
+          if (logTimer !== undefined) cancelSchedule(logTimer)
+          logTimer = undefined
+        },
+      }
+    }
+
+    /**
+     * The notice layer: the one transient message the panel and the toast share.
+     * @param {{
+     *   translate: (key: string, vars?: object) => string,
+     *   publish: () => void
+     * }} deps Injected services.
+     * @returns {object} The notice layer.
+     */
+    function createNotices(deps) {
+      const { translate, publish } = deps
+      let sequence = 0
+      let current
+
+      /**
+       * Build the notice for one settled candidate.
+       * @param {string} name Candidate name.
+       * @param {object} result Outcome.
+       * @returns {object} The notice.
+       */
+      function forOutcome(name, result) {
+        const outcome = typeof result?.outcome === 'string' ? result.outcome : 'failed'
+        const tone = outcome === 'failed'
+          ? 'error'
+          : outcome === 'needsApproval' || outcome === 'restored'
+            ? 'warning'
+            : outcome === 'cancelled'
+              ? 'info'
+              : 'success'
+        const text = outcome === 'updated'
+          ? translate('notice.updated', { name })
+          : outcome === 'reloaded'
+            ? translate('notice.reloaded', { name })
+            : outcome === 'needsApproval'
+              ? translate('notice.needsApproval', { name })
+              : outcome === 'restored'
+                ? translate('notice.restored', { name })
+                : outcome === 'cancelled'
+                  ? translate('notice.cancelled', { name })
+                  : translate('notice.failed', { name })
+        const application = result?.result?.result?.application
+          ?? result?.result?.application
+          ?? result?.application
+        return {
+          id: ++sequence,
+          tone,
+          text,
+          detail: typeof result?.reason === 'string' ? result.reason : undefined,
+          restart: application === 'restart-required',
+        }
+      }
+
+      /**
+       * Build the notice for a finished queue.
+       * @param {object} result Queue outcome.
+       * @returns {object} The notice.
+       */
+      function forBatch(result) {
+        const entries = (result?.results ?? []).map((entry) => ({
+          outcome: entry.outcome,
+          ...(entry.result ?? {}),
+        }))
+        const text = summaryNoticeOf(entries, result?.skippedIgnored ?? 0, translate)
+        const failed = entries.some((entry) => entry.outcome === 'failed')
+        const needs = entries.some((entry) => entry.outcome === 'needsApproval' || entry.outcome === 'restored')
+        const cancelled = result?.cancelled === true || entries.some((entry) => entry.outcome === 'cancelled')
+        const restart = (result?.results ?? []).some((entry) => {
+          const outcome = entry.result ?? {}
+          const application = outcome.result?.result?.application
+            ?? outcome.result?.application
+            ?? outcome.application
+          return application === 'restart-required'
+        })
+        const tone = failed ? 'error' : needs ? 'warning' : cancelled ? 'info' : 'success'
+        return {
+          id: ++sequence,
+          tone,
+          text: text ?? translate('phase.cancelled'),
+          restart,
+        }
+      }
+
+      return {
+        forOutcome,
+        forBatch,
+        /** @param {object} notice The notice to show. @returns {void} */
+        show(notice) { current = notice; publish() },
+        /**
+         * Show a plain notice.
+         * @param {string} tone Tone.
+         * @param {string} text Text.
+         * @param {object} [extra] Extra notice fields, such as `action: false`.
+         * @returns {void}
+         */
+        simple(tone, text, extra = {}) { current = { id: ++sequence, tone, text, ...extra }; publish() },
+        /** @returns {object|undefined} The current notice. */
+        current: () => current,
+        /** @returns {void} Dismiss it. */
+        dismiss() { current = undefined; publish() },
+      }
+    }
+
+    /**
+     * The polling layer: snapshot reads while work runs, and the plugin
+     * manager's forwarded events debounced into one read.
+     * @param {{
+     *   remote: object,
+     *   schedule: (fn: () => void, ms: number) => unknown,
+     *   cancelSchedule: (id: unknown) => void,
+     *   load: (options?: object) => Promise<void>,
+     *   readSnapshot: () => Promise<object|undefined>,
+     *   adopt: (state: object) => void,
+     *   mergeRun: (run: object|undefined) => void,
+     *   attempts: object,
+     *   busy: () => boolean,
+     *   updating: () => boolean
+     * }} deps Injected services.
+     * @returns {object} The polling layer.
+     */
+    function createPoller(deps) {
+      const disposers = []
+      let changeTimer
+      let pollTimer
+      let disposed = false
+      // Every stop invalidates an in-flight read: a poll that resolves after the
+      // run settled must not adopt the stale run or rearm itself.
+      let generation = 0
 
       /**
        * Subscribe to a forwarded event when the host offers them.
@@ -1572,39 +1428,579 @@ window.__ModuleLoader__.load({
        * @returns {void}
        */
       function listen(name, handler) {
-        if (typeof remoteService.$on !== 'function') return
+        if (typeof deps.remote.$on !== 'function') return
         try {
-          const dispose = remoteService.$on(name, handler)
+          const dispose = deps.remote.$on(name, handler)
           if (typeof dispose === 'function') disposers.push(dispose)
         } catch {
           // A host without forwarded events still runs every explicit action.
         }
       }
 
-      listen('plugin-manager/changed', scheduleChange)
-      listen('plugin-manager/update-state', onStep)
-      listen('plugin-manager/install-state', onInstallState)
-      listen('plugin-manager/install-log', onLog)
+      /** @returns {void} Debounce a manager change into a snapshot read. */
+      function scheduleChange() {
+        if (changeTimer !== undefined) deps.cancelSchedule(changeTimer)
+        changeTimer = deps.schedule(() => {
+          changeTimer = undefined
+          void deps.load({ quiet: true })
+        }, CHANGE_DEBOUNCE_MS)
+      }
 
-      const actions = {
-        load,
-        refresh,
-        updateOne,
-        updateAll,
-        recheck,
-        trust,
-        decideBuild,
-        saveConfig,
-        ignore,
-        clearCache,
-        cancel,
-        dismiss,
-        dismissNotice,
-        openPanel,
+      /** @returns {boolean} Whether the snapshot must keep being polled. */
+      function shouldPoll() {
+        return deps.busy()
+      }
+
+      /** @returns {void} Read the snapshot repeatedly while work is running. */
+      function startPolling() {
+        if (pollTimer !== undefined || disposed) return
+        const ticket = ++generation
+        pollTimer = deps.schedule(async () => {
+          pollTimer = undefined
+          if (disposed || ticket !== generation) return
+          const state = await deps.readSnapshot()
+          if (disposed || ticket !== generation) return
+          if (state !== undefined) {
+            deps.adopt(state)
+            deps.mergeRun(state.run)
+          }
+          if (shouldPoll()) startPolling()
+        }, POLL_MS)
+      }
+
+      /** @returns {void} Stop polling. */
+      function stopPolling() {
+        generation += 1
+        if (pollTimer === undefined) return
+        deps.cancelSchedule(pollTimer)
+        pollTimer = undefined
+      }
+
+      listen('plugin-manager/changed', scheduleChange)
+      listen('plugin-manager/update-state', deps.attempts.onStep)
+      listen('plugin-manager/install-state', deps.attempts.onInstallState)
+      listen('plugin-manager/install-log', (chunk) => deps.attempts.onLog(chunk, deps.updating()))
+
+      return {
+        startPolling,
+        stopPolling,
+        scheduleChange,
+        dispose() {
+          disposed = true
+          stopPolling()
+          if (changeTimer !== undefined) deps.cancelSchedule(changeTimer)
+          for (const dispose of disposers.splice(0).reverse()) dispose()
+        },
+      }
+    }
+
+    /**
+     * The action layer: every operation a component can start.
+     *
+     * Each action is a thin composition of the other three layers, so the state
+     * machinery stays out of the components and the actions stay testable with a
+     * fake remote, a fake clock, and a fake clipboard.
+     * @param {{
+     *   call: (name: string, request?: object, options?: object) => Promise<unknown>,
+     *   load: (options?: object) => Promise<void>,
+     *   rows: () => object[],
+     *   base: () => object,
+     *   attempts: object,
+     *   notices: object,
+     *   poller: object,
+     *   copyText: (text: string) => Promise<void>,
+     *   translate: (key: string, vars?: object) => string,
+     *   layout: object,
+     *   phase: () => string,
+     *   setPhase: (phase: string) => void,
+     *   setBusy: (busy: boolean) => void,
+     *   setError: (text: string|undefined) => void,
+     *   error: () => string|undefined,
+     *   publish: () => void
+     * }} deps Injected services and accessors.
+     * @returns {object} The actions.
+     */
+    function createActions(deps) {
+      const { attempts, notices, poller, translate, layout } = deps
+
+      /**
+       * Update one candidate.
+       * @param {string} name Candidate name.
+       * @returns {Promise<void>}
+       */
+      async function updateOne(name) {
+        const row = deps.base().rows.find((entry) => entry.name === name)
+        if (row === undefined) return
+        const step = initialStep(row)
+        attempts.clearBufferedLogs()
+        attempts.cache(name, row)
+        attempts.attempts()[name] = attempts.runningAttempt(row, step)
+        deps.setError(undefined)
+        attempts.announce(name + ': ' + stepLabel(step, translate))
+        deps.setPhase('updating')
+        deps.setBusy(true)
+        deps.publish()
+        poller.startPolling()
+        const result = await deps.call('updateOne', { name })
+        const outcome = result ?? { outcome: 'failed', reason: deps.error() }
+        attempts.settle(name, outcome)
+        notices.show(notices.forOutcome(name, outcome))
+        deps.setPhase('idle')
+        deps.setBusy(false)
+        poller.stopPolling()
+        deps.publish()
+        await deps.load({ quiet: true })
+      }
+
+      /**
+       * Update every pending candidate through the host queue.
+       * @returns {Promise<void>}
+       */
+      async function updateAll() {
+        if (deps.phase() === 'updating') return
+        attempts.clearBufferedLogs()
+        for (const row of deps.base().rows) {
+          if (row.action !== 'retry') attempts.cache(row.name, row)
+        }
+        attempts.setBatch(true)
+        deps.setError(undefined)
+        deps.setPhase('updating')
+        deps.setBusy(true)
+        deps.publish()
+        poller.startPolling()
+        const result = await deps.call('updateAll')
+        if (result !== undefined) {
+          for (const entry of result.results ?? []) {
+            attempts.settle(entry.name, entry.result ?? { outcome: entry.outcome })
+          }
+          notices.show(notices.forBatch(result))
+        } else {
+          // The queue failed before reporting: no candidate it had started may
+          // stay "running" forever.
+          for (const [name, attempt] of Object.entries(attempts.attempts())) {
+            if (attempt.state === 'running') attempts.settle(name, { outcome: 'failed', reason: deps.error() })
+          }
+          notices.simple('error', deps.error() ?? translate('phase.failed'))
+        }
+        attempts.setBatch(false)
+        deps.setPhase('idle')
+        deps.setBusy(false)
+        poller.stopPolling()
+        deps.publish()
+        await deps.load({ quiet: true })
+      }
+
+      /**
+       * Re-check one failed candidate.
+       * @param {string} name Candidate name.
+       * @returns {Promise<void>}
+       */
+      async function recheck(name) {
+        const row = deps.base().rows.find((entry) => entry.name === name)
+        if (row === undefined) return
+        attempts.attempts()[name] = attempts.runningAttempt(row, 'checking')
+        deps.setError(undefined)
+        deps.setPhase('checking')
+        deps.setBusy(true)
+        deps.publish()
+        const state = await deps.call('recheck', { name })
+        if (state !== undefined) deps.adopt(state)
+        attempts.forget(name)
+        deps.setPhase('idle')
+        deps.setBusy(false)
+        deps.publish()
+      }
+
+      /**
+       * Trust the repository a candidate was installed from.
+       * @param {string} name Candidate name.
+       * @returns {Promise<void>}
+       */
+      async function trust(name) {
+        deps.setBusy(true)
+        deps.publish()
+        const state = await deps.call('trustRepository', { name })
+        if (state !== undefined) deps.adopt(state)
+        deps.setBusy(false)
+        deps.publish()
+      }
+
+      /**
+       * Decide a pending build approval.
+       * @param {string} name Candidate name.
+       * @param {string} decision allow, always-allow, or decline.
+       * @returns {Promise<void>}
+       */
+      async function decideBuild(name, decision) {
+        const row = deps.base().rows.find((entry) => entry.name === name) ?? attempts.rowCache()[name]
+        attempts.clearBufferedLogs()
+        if (row !== undefined) attempts.attempts()[name] = attempts.runningAttempt(row, 'installing')
+        deps.setError(undefined)
+        deps.setPhase('updating')
+        deps.setBusy(true)
+        deps.publish()
+        poller.startPolling()
+        const answer = await deps.call('decideBuild', { name, decision })
+        if (answer !== undefined && answer.snapshot !== undefined) deps.adopt(answer.snapshot)
+        if (answer !== undefined && answer.result !== undefined) {
+          attempts.settle(name, answer.result)
+          notices.show(notices.forOutcome(name, answer.result))
+        } else {
+          attempts.forget(name)
+        }
+        deps.setPhase('idle')
+        deps.setBusy(false)
+        poller.stopPolling()
+        deps.publish()
+        if (answer !== undefined && answer.result !== undefined) await deps.load({ quiet: true })
+      }
+
+      /**
+       * Save a configuration patch and adopt the returned snapshot.
+       * @param {object} patch Partial configuration.
+       * @returns {Promise<void>}
+       */
+      async function saveConfig(patch) {
+        const state = await deps.call('saveConfig', patch)
+        if (state !== undefined) deps.adopt(state)
+      }
+
+      /**
+       * Ignore the update a row offers.
+       * @param {object} row Row model.
+       * @returns {Promise<void>}
+       */
+      async function ignore(row) {
+        // A git update is identified by its commit, a registry one by its
+        // version: several commits can share a version, and ignoring by
+        // version would hide a later, different commit.
+        const identity = row.kind === 'git' ? row.commit : row.available
+        if (identity === undefined) return
+        const kept = (deps.base().ignoredUpdates ?? []).filter((entry) => entry.name !== row.name)
+        await saveConfig({ ignoredUpdates: [...kept, { name: row.name, identity: String(identity) }] })
+      }
+
+      /** @returns {Promise<void>} Clear the clone cache. */
+      async function clearCache() {
+        const state = await deps.call('clearCache')
+        if (state !== undefined) deps.adopt(state)
+      }
+
+      /** @returns {Promise<void>} Abandon a running queue. */
+      async function cancel() {
+        await deps.call('cancel')
+      }
+
+      /**
+       * Copy one row's diagnosis for pasting elsewhere.
+       * @param {string} name Candidate name.
+       * @returns {Promise<void>}
+       */
+      async function copy(name) {
+        const row = deps.rows().find((entry) => entry.name === name)
+        if (row === undefined) return
+        try {
+          await deps.copyText(diagnosisText(row))
+          // A copy confirmation has nothing to open; offering "View details"
+          // there is noise on top of the message.
+          notices.simple('success', translate('row.copiedDetails'), { action: false })
+        } catch (error) {
+          notices.simple('error', translate('error.generic', {
+            reason: error instanceof Error ? error.message : String(error),
+          }))
+        }
+      }
+
+      /**
+       * Remove one settled row from the panel.
+       * @param {string} name Candidate name.
+       * @returns {void}
+       */
+      function dismiss(name) {
+        // The approval is still the user's to decide; hiding the row would
+        // leave the host holding a request with no way back to it.
+        if ((deps.base().approvals ?? []).some((approval) => approval.name === name)) return
+        const row = deps.base().rows.find((entry) => entry.name === name)
+          ?? attempts.attempts()[name]?.row
+          ?? attempts.rowCache()[name]
+        attempts.dismiss(name, row)
+      }
+
+      /** @returns {void} Dismiss the current notice. */
+      function dismissNotice() {
+        notices.dismiss()
+      }
+
+      /** @returns {void} Open the panel and read the current snapshot. */
+      function openPanel() {
+        layout.selectPanel(PANEL_ID)
+        void deps.load()
       }
 
       return {
-        actions,
+        updateOne, updateAll, recheck, trust, decideBuild, saveConfig, ignore,
+        clearCache, cancel, copy, dismiss, dismissNotice, openPanel,
+      }
+    }
+
+    /**
+     * Create the client store.
+     *
+     * The store owns the two state layers and the one-way flow between them: the
+     * host snapshot is the base, the session layers are the facts that must
+     * outlive a reload (attempts, output, settled outcomes, notices, dismissed
+     * rows), and the view is derived from both. The four collaborators each own
+     * one lifecycle, so none of them has to know how the others work.
+     * @param {{
+     *   remote: object,
+     *   layout: object,
+     *   translate?: (key: string, vars?: object) => string,
+     *   schedule?: (fn: () => void, ms: number) => unknown,
+     *   cancelSchedule?: (id: unknown) => void,
+     *   copy?: (text: string) => Promise<void>
+     * }} deps Client services and test seams.
+     * @returns {object} The store.
+     */
+    function createStore(deps) {
+      const remoteService = deps.remote
+      const layout = deps.layout
+      const translate = deps.translate ?? t
+      const schedule = deps.schedule ?? ((fn, ms) => setTimeout(fn, ms))
+      const cancelSchedule = deps.cancelSchedule ?? ((id) => clearTimeout(id))
+      const copyText = deps.copy ?? ((text) => navigator.clipboard.writeText(text))
+
+      const listeners = new Set()
+      let disposed = false
+      let base = emptyBase()
+      let phase = 'idle'
+      let busy = false
+      let errorText
+      let view
+
+      const attempts = createAttempts({
+        translate,
+        publish: () => publish(),
+        schedule,
+        cancelSchedule,
+        baseRows: () => base.rows,
+        currentRun: () => base.run,
+      })
+      const notices = createNotices({ translate, publish: () => publish() })
+      const poller = createPoller({
+        remote: remoteService,
+        schedule,
+        cancelSchedule,
+        load: (options) => load(options),
+        readSnapshot: () => call('snapshot', undefined, { quiet: true }),
+        adopt: (state) => adopt(state),
+        mergeRun: (run) => attempts.mergeRun(run),
+        attempts,
+        busy: () => shouldPoll(),
+        updating: () => phase === 'updating',
+      })
+
+      /** @returns {object} The base layer of the panel state. */
+      function emptyBase() {
+        return {
+          rows: [], ignored: [], total: 0, checkedAt: undefined, current: undefined,
+          lastFailure: undefined, restartRequired: [], specRestoreFailed: [], cache: undefined,
+          trustedRepositories: [], ignoredUpdates: [], run: undefined, approvals: [], running: false,
+        }
+      }
+
+      /** @returns {object} The session layer of the panel state. */
+      function sessionState() {
+        return {
+          attempts: attempts.attempts(),
+          dismissed: attempts.dismissed(),
+          rowCache: attempts.rowCache(),
+          batch: attempts.batch(),
+          notice: notices.current(),
+          error: errorText,
+          announcement: attempts.announcement(),
+        }
+      }
+
+      /** @returns {object} The immutable view components render. */
+      function buildView() {
+        const session = sessionState()
+        const rows = rowsOf(base.rows, session, base.approvals ?? [], phase)
+        const pending = rows.filter((row) => (row.action === 'update' || row.action === 'reload')
+          && row.state === 'idle' && row.approval === undefined)
+        // The total follows the rows the user can actually act on. A blocked
+        // row explains itself and is not pending work; a settled row still
+        // counts unless its update or reload actually applied.
+        const total = rows.filter((row) => {
+          if (row.state === 'idle' || row.state === 'failed-check' || row.state === 'queued' || row.state === 'running') return true
+          if (row.state !== 'settled' && row.state !== 'failed') return false
+          return row.outcome !== 'updated' && row.outcome !== 'reloaded'
+        }).length
+        return {
+          phase,
+          busy,
+          rows,
+          pending,
+          total,
+          checkedAt: base.checkedAt,
+          current: base.current,
+          lastFailure: base.lastFailure,
+          restartRequired: base.restartRequired ?? [],
+          ignored: base.ignored ?? [],
+          ignoredUpdates: base.ignoredUpdates ?? [],
+          trustedRepositories: base.trustedRepositories ?? [],
+          cache: base.cache,
+          notice: session.notice,
+          error: session.error,
+          announcement: session.announcement,
+          header: headerOf({ ...base, total }, translate),
+          canUpdateAll: pending.length > 0 && phase !== 'updating' && busy !== true,
+          updating: phase === 'updating',
+          checking: phase === 'checking' || base.running === true,
+        }
+      }
+
+      view = buildView()
+
+      /** @returns {void} Notify every subscriber with a fresh view. */
+      function publish() {
+        if (disposed) return
+        view = buildView()
+        for (const listener of listeners) listener()
+      }
+
+      /**
+       * Replace the base layer from one host snapshot.
+       * @param {object} state Snapshot.
+       * @returns {void}
+       */
+      function adopt(state) {
+        base = {
+          rows: rowsFromSnapshot(state),
+          ignored: state.ignored ?? [],
+          total: state.total ?? 0,
+          checkedAt: state.checkedAt,
+          current: state.current,
+          lastFailure: state.lastFailure,
+          restartRequired: state.restartRequired ?? [],
+          specRestoreFailed: state.specRestoreFailed ?? [],
+          cache: state.cache,
+          trustedRepositories: state.trustedRepositories ?? [],
+          ignoredUpdates: state.ignoredUpdates ?? [],
+          run: state.run,
+          approvals: state.approvals ?? [],
+          running: state.running === true,
+        }
+        // A snapshot read can be the first thing that carries a run (a load
+        // during a batch), so its results are merged rather than waiting for the
+        // next poll. `mergeRun` publishes.
+        if (state.run === undefined || state.run === null) publish()
+        else attempts.mergeRun(state.run)
+      }
+
+      /**
+       * Unwrap the host's result envelope.
+       * @param {unknown} result Host result.
+       * @returns {unknown} The value.
+       */
+      function unwrap(result) {
+        if (result !== null && typeof result === 'object' && 'ok' in result) {
+          if (result.ok === true) return result.value
+          throw new Error(result.error?.message ?? 'the host refused the call')
+        }
+        return result
+      }
+
+      /**
+       * Call one host method, keeping failures in the session layer.
+       * @param {string} name Method name.
+       * @param {object} [request] Request.
+       * @param {{quiet?: boolean}} [options] Whether a failure stays silent.
+       * @returns {Promise<unknown>} The value, or undefined on failure.
+       */
+      async function call(name, request, options = {}) {
+        try {
+          const fn = remoteService.pluginUpdater === undefined ? undefined : remoteService.pluginUpdater[name]
+          if (typeof fn !== 'function') throw new Error('the host does not expose ' + name)
+          const result = unwrap(await fn(request ?? {}))
+          if (options.quiet !== true) errorText = undefined
+          return result
+        } catch (error) {
+          if (options.quiet !== true) {
+            errorText = translate('error.generic', {
+              reason: error instanceof Error ? error.message : String(error),
+            })
+            publish()
+          }
+          return undefined
+        }
+      }
+
+      /**
+       * Read the current snapshot without starting detection.
+       * @param {{quiet?: boolean}} [options] Whether progress is shown.
+       * @returns {Promise<void>}
+       */
+      async function load(options = {}) {
+        // A quiet read never owns the busy flag: an action that set it keeps it
+        // until its own operation settles.
+        const ownsBusy = options.quiet !== true
+        if (ownsBusy) {
+          busy = true
+          if (base.checkedAt === undefined && base.rows.length === 0 && phase === 'idle') phase = 'loading'
+          publish()
+        }
+        const state = await call('snapshot', undefined, options)
+        if (state !== undefined) adopt(state)
+        if (ownsBusy) busy = false
+        if (phase === 'loading') phase = 'idle'
+        publish()
+        if (shouldPoll()) poller.startPolling()
+      }
+
+      /** @returns {Promise<void>} Start a manual detection and clear settled rows. */
+      async function refresh() {
+        attempts.clearSettled()
+        phase = 'checking'
+        busy = true
+        errorText = undefined
+        publish()
+        const state = await call('refresh')
+        if (state !== undefined) adopt(state)
+        phase = 'idle'
+        busy = false
+        publish()
+      }
+
+      /** @returns {boolean} Whether the snapshot must keep being polled. */
+      function shouldPoll() {
+        if (phase === 'updating') return true
+        if (base.running === true) return true
+        if (base.run !== undefined) return true
+        return Object.values(attempts.attempts()).some((attempt) => attempt.state === 'running')
+      }
+
+      const actions = createActions({
+        call,
+        load,
+        rows: () => view.rows,
+        base: () => base,
+        attempts,
+        notices,
+        poller,
+        copyText,
+        translate,
+        layout,
+        phase: () => phase,
+        setPhase: (next) => { phase = next },
+        setBusy: (next) => { busy = next },
+        setError: (text) => { errorText = text },
+        error: () => errorText,
+        publish,
+        adopt,
+      })
+
+      return {
+        actions: { load, refresh, ...actions },
         getSnapshot: () => view,
         subscribe(listener) {
           listeners.add(listener)
@@ -1612,10 +2008,8 @@ window.__ModuleLoader__.load({
         },
         dispose() {
           disposed = true
-          stopPolling()
-          if (changeTimer !== undefined) cancelSchedule(changeTimer)
-          if (logTimer !== undefined) cancelSchedule(logTimer)
-          for (const dispose of disposers.splice(0).reverse()) dispose()
+          poller.dispose()
+          attempts.dispose()
           listeners.clear()
         },
       }
@@ -1647,6 +2041,7 @@ window.__ModuleLoader__.load({
       .updater-row { display: flex; flex-direction: column; gap: 6px; padding: 12px 2px; border-bottom: 0.5px solid var(--dsw-alias-border-l2); }
       .updater-row:last-child { border-bottom: 0; }
       .updater-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+      .updater-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
       .updater-name { font-size: 13.5px; line-height: 20px; font-weight: 500; overflow-wrap: anywhere; }
       .updater-chip { flex: none; padding: 1px 7px; border-radius: var(--dsw-radius-xs); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 16px; }
       .updater-version { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -1673,7 +2068,11 @@ window.__ModuleLoader__.load({
       .updater-hint { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; }
       .updater-error-text { color: var(--dsw-alias-state-error-primary); }
       .updater-warn { margin: 0; padding: 8px 10px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 18px; }
-      .updater-detail { display: flex; flex-direction: column; gap: 4px; }
+      .updater-detail { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+      .updater-details { container-type: inline-size; }
+      .updater-detail-grid { display: grid; gap: 12px 20px; min-width: 0; }
+      .updater-detail:only-child { grid-column: 1 / -1; }
+      @container (min-width: 560px) { .updater-detail-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
       .updater-notes { --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2); --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2); display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; margin: 0; padding: 0; list-style: none; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
       .updater-commit { font-family: var(--ds-font-family-code); font-size: 11px; color: var(--dsw-alias-label-tertiary); }
       .updater-output { --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2); --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2); max-height: 220px; overflow: auto; margin: 0; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-2); font-family: var(--ds-font-family-code); font-size: 11.5px; line-height: 17px; white-space: pre-wrap; word-break: break-word; }
@@ -2031,13 +2430,18 @@ window.__ModuleLoader__.load({
      * @returns {object} The element.
      */
     function Row({ row, store }) {
-      const [notesOpen, setNotesOpen] = useState(false)
-      const [outputOpen, setOutputOpen] = useState(false)
-      const failed = row.state === 'failed'
-        || (row.state === 'settled' && (row.outcome === 'failed' || row.outcome === 'restored'))
-      useEffect(() => {
-        if (failed) setOutputOpen(true)
-      }, [failed])
+      return h('li', { className: 'updater-row', 'data-state': row.state },
+        h(RowHead, { row, store }),
+        h(RowBody, { row, store }),
+      )
+    }
+
+    /**
+     * The head of one row: identity, status, and the actions that apply to it.
+     * @param {object} props Row and store.
+     * @returns {object} The element.
+     */
+    function RowHead({ row, store }) {
       const status = statusOf(row, t)
       const actionable = row.state === 'idle' || row.state === 'failed-check'
       const version = versionLine(row, t)
@@ -2048,21 +2452,23 @@ window.__ModuleLoader__.load({
         if (row.action === 'retry') void store.actions.recheck(row.name)
         else void store.actions.updateOne(row.name)
       }
-      const hasOutput = row.output !== undefined && (row.output.text !== '' || row.state === 'running')
       const showTrust = actionable && row.kind === 'git' && typeof row.repository === 'string'
         && row.trusted !== true && row.approval === undefined
 
-      return h('li', { className: 'updater-row', 'data-state': row.state },
-        h('div', { className: 'updater-row-head' },
-          h('span', { className: 'updater-name' }, row.name),
-          sourceLabel(row, t) === '' ? null : h('span', { className: 'updater-chip' }, sourceLabel(row, t)),
-          version === '' ? null : h('span', { className: 'updater-version' }, version),
-          row.state === 'failed-check'
-            ? h('span', { className: 'updater-dot', role: 'img', 'aria-label': t('entry.checkFailed'), title: t('entry.checkFailed') })
-            : null,
-          h('span', { className: 'updater-spacer' }),
+      return h('div', { className: 'updater-row-head' },
+        h('span', { className: 'updater-name' }, row.name),
+        sourceLabel(row, t) === '' ? null : h('span', { className: 'updater-chip' }, sourceLabel(row, t)),
+        version === '' ? null : h('span', { className: 'updater-version' }, version),
+        row.state === 'failed-check'
+          ? h('span', { className: 'updater-dot', role: 'img', 'aria-label': t('entry.checkFailed'), title: t('entry.checkFailed') })
+          : null,
+        h('span', { className: 'updater-spacer' }),
+        // One group, so a narrow row wraps status, copy, and dismiss together
+        // instead of leaving a control orphaned on the next line.
+        h('div', { className: 'updater-row-actions' },
           status === undefined ? null : h('span', { className: 'updater-badge', 'data-tone': status.tone }, status.label),
           row.state === 'running' ? h(Spinner) : null,
+          hasDiagnosis(row) ? h(CopyDiagnosis, { row, store }) : null,
           actionable && row.approval === undefined
             ? h('button', {
               type: 'button',
@@ -2098,43 +2504,104 @@ window.__ModuleLoader__.load({
             }, '\u00d7')
             : null,
         ),
+      )
+    }
+
+    /**
+     * The lines under a row's head: the diagnosis, the warnings, the approval
+     * request, and the detail panes.
+     * @param {object} props Row and store.
+     * @returns {object} The element.
+     */
+    function RowBody({ row, store }) {
+      // A blocked or unchecked row explains the detection, not an older attempt.
+      const line = row.state === 'blocked' || row.state === 'failed-check' ? row.reason : diagnosisLine(row)
+      // `restored` is false both when nothing was removed and when a
+      // reinstallation failed; only the first leaves the installed version in
+      // place. A failed reinstall has its own recovery diagnosis instead.
+      const untouched = row.failure !== undefined && row.failure.recovery === undefined
+        && row.failure.restored !== true
+        && (row.state === 'failed' || (row.state === 'settled' && row.outcome === 'failed'))
+      const guidance = typeof row.failure?.reason === 'string' && row.failure.reason !== line
+        && row.failure.recovery !== undefined
+        ? row.failure.reason
+        : undefined
+      return h(React.Fragment, null,
         row.kind === 'local' && row.state === 'idle' ? h('p', { className: 'updater-hint' }, t('row.reloadHint')) : null,
-        row.state === 'failed-check' && row.reason !== undefined
-          ? h('p', { className: 'updater-hint updater-error-text' }, row.reason)
-          : row.reason === undefined ? null : h('p', { className: 'updater-hint' }, row.reason),
+        line === undefined ? null : h('p', {
+          className: row.state === 'failed-check' ? 'updater-hint updater-error-text' : 'updater-hint',
+        }, line),
+        untouched ? h('p', { className: 'updater-hint' }, t('row.failureUntouched')) : null,
+        guidance === undefined ? null : h('p', { className: 'updater-hint updater-error-text' }, guidance),
         row.specRestoreFailed === undefined ? null : h('p', { className: 'updater-warn' }, t('row.specRestoreFailed', { reason: row.specRestoreFailed })),
-        (row.approved ?? []).length === 0
-          ? null
-          : h('p', { className: 'updater-hint' }, row.repository === undefined
-            ? t('phase.approved') + ': ' + row.approved.join(', ')
-            : t('phase.approved') + ' — ' + row.repository + ': ' + row.approved.join(', ')),
         row.approval === undefined ? null : h(ApprovalCard, { row, store }),
-        row.notes === undefined ? null : h('div', { className: 'updater-detail' },
-          h('button', {
-            type: 'button',
-            className: 'updater-link',
-            'aria-expanded': notesOpen,
-            onClick: () => { setNotesOpen(!notesOpen) },
-          }, notesOpen ? t('row.hideNotes') : t('row.showNotes')),
-          notesOpen
-            ? (row.notes.available === true
-              ? ((row.notes.items ?? []).length === 0
-                ? h('p', { className: 'updater-hint' }, t('row.notesNone'))
-                : h('ul', { className: 'updater-notes' }, row.notes.items.map((item) => h('li', { key: item.commit },
-                  h('span', { className: 'updater-commit' }, String(item.commit).slice(0, 7)), ' ', item.subject,
-                ))))
-              : h('p', { className: 'updater-hint' }, t('row.notesUnavailable', { reason: row.notes.reason ?? 'unknown' })))
-            : null,
+        h(RowDetails, { row }),
+      )
+    }
+
+    /**
+     * The copy-details action of one failed row.
+     * @param {object} props Row and store.
+     * @returns {object} The element.
+     */
+    function CopyDiagnosis({ row, store }) {
+      return h('button', {
+        type: 'button',
+        className: 'updater-link updater-copy',
+        'aria-label': t('row.copyDetails') + ' ' + row.name,
+        onClick: () => { void store.actions.copy(row.name) },
+      }, t('row.copyDetails'))
+    }
+
+    /**
+     * The two detail panes of one row: release notes and package manager output.
+     *
+     * They sit side by side when the panel column is wide enough and stack when
+     * it is not, which is why the layout is a container query and not a media
+     * query: the panel width is not the window width. Each pane collapses on its
+     * own, and a failure opens the output without asking.
+     * @param {object} props Row.
+     * @returns {object|null} The element.
+     */
+    function RowDetails({ row }) {
+      const [notesOpen, setNotesOpen] = useState(false)
+      const [outputOpen, setOutputOpen] = useState(false)
+      const failed = row.state === 'failed'
+        || (row.state === 'settled' && (row.outcome === 'failed' || row.outcome === 'restored'))
+      useEffect(() => {
+        if (failed) setOutputOpen(true)
+      }, [failed])
+      const hasOutput = row.output !== undefined && (row.output.text !== '' || row.state === 'running')
+      if (row.notes === undefined && !hasOutput) return null
+      return h('div', { className: 'updater-details' },
+        h('div', { className: 'updater-detail-grid' },
+          row.notes === undefined ? null : h('div', { className: 'updater-detail' },
+            h('button', {
+              type: 'button',
+              className: 'updater-link',
+              'aria-expanded': notesOpen,
+              onClick: () => { setNotesOpen(!notesOpen) },
+            }, notesOpen ? t('row.hideNotes') : t('row.showNotes')),
+            notesOpen
+              ? (row.notes.available === true
+                ? ((row.notes.items ?? []).length === 0
+                  ? h('p', { className: 'updater-hint' }, t('row.notesNone'))
+                  : h('ul', { className: 'updater-notes' }, row.notes.items.map((item) => h('li', { key: item.commit },
+                    h('span', { className: 'updater-commit' }, String(item.commit).slice(0, 7)), ' ', item.subject,
+                  ))))
+                : h('p', { className: 'updater-hint' }, t('row.notesUnavailable', { reason: row.notes.reason ?? 'unknown' })))
+              : null,
+          ),
+          hasOutput ? h('div', { className: 'updater-detail' },
+            h('button', {
+              type: 'button',
+              className: 'updater-link',
+              'aria-expanded': outputOpen,
+              onClick: () => { setOutputOpen(!outputOpen) },
+            }, outputOpen ? t('row.hideOutput') : t('row.showOutput')),
+            outputOpen ? h('pre', { className: 'updater-output' }, row.output.text) : null,
+          ) : null,
         ),
-        hasOutput ? h('div', { className: 'updater-detail' },
-          h('button', {
-            type: 'button',
-            className: 'updater-link',
-            'aria-expanded': outputOpen,
-            onClick: () => { setOutputOpen(!outputOpen) },
-          }, outputOpen ? t('row.hideOutput') : t('row.showOutput')),
-          outputOpen ? h('pre', { className: 'updater-output' }, row.output.text) : null,
-        ) : null,
       )
     }
 
@@ -2355,7 +2822,7 @@ window.__ModuleLoader__.load({
             notice.detail === undefined ? null : h('span', { className: 'updater-toast-detail' }, notice.detail),
             notice.restart === true ? h('span', { className: 'updater-toast-detail' }, t('restart.required')) : null,
           ),
-          h('button', {
+          notice.action === false ? null : h('button', {
             type: 'button',
             className: 'updater-toast-action',
             onClick: () => { store.actions.openPanel(); store.actions.dismissNotice() },
@@ -2433,6 +2900,11 @@ window.__ModuleLoader__.load({
       outcomeLabel,
       versionLine,
       formatClock,
+      diagnosisLine,
+      diagnosisText,
+      hasDiagnosis,
+      RowBody,
+      RowDetails,
     }
 
   },

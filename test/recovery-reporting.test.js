@@ -67,15 +67,24 @@ describe('a failed spec restore is part of the outcome', () => {
     const dir = await mkdtemp(join(tmpdir(), 'updater-both-'))
     try {
       await writeFile(join(dir, 'package.json'), '{ broken')
+      const installed = []
       const host = {
         async removeBundle() { return { application: 'applied' } },
-        async installBundle() { return { application: 'failed' } },
+        async installBundle(spec) {
+          installed.push(spec)
+          // The first attempt is refused as already installed, which is what
+          // removes the package; every later attempt fails for a real reason.
+          if (installed.length === 1) {
+            return { application: 'failed', error: { code: 'already-installed' } }
+          }
+          return { application: 'failed', error: { code: 'operation-error' } }
+        },
       }
-      await assert.doesNotReject(() => updateGit({
-        name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir: dir, host,
-      }))
-      const result = await updateGit({
-        name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir: dir, host,
+      let result
+      await assert.doesNotReject(async () => {
+        result = await updateGit({
+          name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir: dir, host,
+        })
       })
       assert.match(result.reason, /could not restore/)
       assert.match(result.reason, /reinstall .*#/)

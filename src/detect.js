@@ -13,18 +13,25 @@ import { commitsBetween, hasCommit, remoteHead, versionAt } from './git.js'
 import { cloneUrl, pinnedSpec } from './spec.js'
 import { isNewer } from './version.js'
 
+/** The reason text for a registry candidate with nothing installable here. */
+const NO_COMPATIBLE_VERSION = 'no published version is compatible with this DeepSeek Harness'
+const NO_INSTALLABLE_VERSION = 'no newer published version is installable from here'
+
 /**
  * The state of one candidate after a check.
  *
  * `current` means nothing to do; `update` means an action is available;
- * `unchecked` means the check could not establish the state, and is deliberately
- * distinct from `current` so a broken repository is never reported as up to date.
+ * `blocked` means newer versions exist but none can run here, and is distinct
+ * from `current` so the user learns why nothing happens; `unchecked` means the
+ * check could not establish the state. `blocked` is deliberately not an update:
+ * offering it would be an action the host always refuses.
  * @typedef {{
  *   name: string,
  *   kind: 'registry'|'git'|'local',
- *   state: 'current'|'update'|'unchecked',
+ *   state: 'current'|'update'|'blocked'|'unchecked',
  *   installed?: string,
  *   repository?: string,
+ *   registry?: string,
  *   identity?: object,
  *   reason?: string,
  *   notes?: {available: boolean, commits?: number, items?: object[], reason?: string}
@@ -57,11 +64,27 @@ export async function checkRegistry(input) {
     }
   }
   const installed = input.installed ?? answer.installed
-  const target = (answer.versions ?? []).find((version) => version.incompatible === undefined)
-    ?? (answer.versions ?? [])[0]
-  if (target === undefined || installed === undefined) {
-    return { name: input.name, kind: 'registry', state: 'current', ...installed === undefined ? {} : { installed } }
+  const versions = Array.isArray(answer.versions) ? answer.versions : []
+  // `null` is a value, not an absence: it asks pnpm's own registry, while an
+  // absent field asks the remembered or configured one.
+  const registry = answer.registry === undefined ? undefined : answer.registry
+  // A version that declares no bundle cannot be installed, and one the running
+  // DSH rejects is refused by the host at the check step. Neither is an update.
+  const target = versions.find((version) => version?.bundle === true && version.incompatible === undefined)
+  if (target === undefined) {
+    if (versions.length === 0 || installed === undefined) {
+      return { name: input.name, kind: 'registry', state: 'current', ...installed === undefined ? {} : { installed } }
+    }
+    return {
+      name: input.name,
+      kind: 'registry',
+      state: 'blocked',
+      installed,
+      reason: noVersionReason(versions, answer.omitted),
+      ...registry === undefined ? {} : { registry },
+    }
   }
+  if (installed === undefined) return { name: input.name, kind: 'registry', state: 'current' }
   if (!isNewer(target.version, installed)) {
     return { name: input.name, kind: 'registry', state: 'current', installed }
   }
@@ -70,9 +93,30 @@ export async function checkRegistry(input) {
     kind: 'registry',
     state: 'update',
     installed,
-    identity: { kind: 'version', installed, available: target.version },
+    // The answering registry is what makes the update ask the same registry
+    // order the listing did.
+    identity: {
+      kind: 'version', installed, available: target.version,
+      ...registry === undefined ? {} : { registry },
+    },
     ...target.deprecated === undefined ? {} : { reason: `deprecated: ${target.deprecated}` },
   }
+}
+
+/**
+ * Why no newer version could be offered.
+ * @param {object[]} versions Newer published versions.
+ * @param {unknown} omitted How many newer versions the Host did not list.
+ * @returns {string} The reason.
+ */
+function noVersionReason(versions, omitted) {
+  const cause = versions.every((version) => version?.incompatible !== undefined)
+    ? NO_COMPATIBLE_VERSION
+    : NO_INSTALLABLE_VERSION
+  const more = typeof omitted === 'number' && omitted > 0
+    ? ` (${omitted} newer version${omitted === 1 ? '' : 's'} not listed here)`
+    : ''
+  return cause + more
 }
 
 /**

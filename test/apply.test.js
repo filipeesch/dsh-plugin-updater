@@ -35,10 +35,9 @@ async function savedValue() {
 
 /**
  * A host that records the specs it installs and always succeeds.
- * @param {{failInstall?: boolean}} [options] Failure switch.
  * @returns {object} The host double and its calls.
  */
-function hostDouble(options = {}) {
+function hostDouble() {
   const calls = []
   return {
     calls,
@@ -52,10 +51,17 @@ function hostDouble(options = {}) {
       const manifest = JSON.parse(await readFile(join(profileDir, 'package.json'), 'utf8'))
       manifest.dependencies[NAME] = spec
       await writeFile(join(profileDir, 'package.json'), `${JSON.stringify(manifest, undefined, 2)}\n`)
-      if (options.failInstall === true) throw new Error('install failed')
       return { changed: true, application: 'applied', stage: 'install', target: spec }
     },
   }
+}
+
+/**
+ * The refusal a host with hot module replacement reports for an installed package.
+ * @returns {Error} The failure the host resolves or throws with.
+ */
+function alreadyInstalled() {
+  return Object.assign(new Error('the package is already installed'), { code: 'already-installed' })
 }
 
 before(async () => {
@@ -78,25 +84,65 @@ describe('updateGit', () => {
     assert.equal(isPinned(await savedValue(), NAME), false)
   })
 
-  it('installs the target commit during the attempt', async () => {
+  it('installs the target commit over the running package first', async () => {
     await writeManifest(SAVED)
     const host = hostDouble()
     await updateGit({ name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host })
-    const install = host.calls.find(([kind]) => kind === 'install')
-    assert.ok(install[1].endsWith(`#${NEW}`))
+    assert.deepEqual(host.calls.map(([kind]) => kind), ['install'])
+    assert.ok(host.calls[0][1].endsWith(`#${NEW}`))
   })
 
-  it('restores the previous commit when installation fails', async () => {
+  it('leaves the installed package in place when the install-over attempt fails', async () => {
     await writeManifest(SAVED)
-    // Fail the first install, succeed the restoration.
-    let attempts = 0
+    const calls = []
     const host = {
-      calls: [],
+      async removeBundle() { calls.push('remove'); return { application: 'applied' } },
+      async installBundle() { calls.push('install'); throw new Error('registry unreachable') },
+    }
+    const result = await updateGit({
+      name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host,
+    })
+    assert.equal(result.outcome, 'failed')
+    assert.equal(result.step, 'install')
+    assert.deepEqual(calls, ['install'])
+    assert.match(result.reason, /registry unreachable/)
+    assert.equal(await savedValue(), SAVED)
+  })
+
+  it('removes and retries when the host refuses to install over the package', async () => {
+    await writeManifest(SAVED)
+    const calls = []
+    const host = {
+      async removeBundle() { calls.push('remove'); return { changed: true, application: 'applied' } },
+      async installBundle(spec) {
+        calls.push(['install', spec])
+        if (calls.length === 1) throw alreadyInstalled()
+        const manifest = JSON.parse(await readFile(join(profileDir, 'package.json'), 'utf8'))
+        manifest.dependencies[NAME] = spec
+        await writeFile(join(profileDir, 'package.json'), `${JSON.stringify(manifest, undefined, 2)}\n`)
+        return { changed: true, application: 'applied' }
+      },
+    }
+    const result = await updateGit({
+      name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host,
+    })
+    assert.equal(result.outcome, 'updated')
+    assert.deepEqual(calls.map((entry) => Array.isArray(entry) ? 'install' : entry), ['install', 'remove', 'install'])
+    assert.ok(calls.at(-1)[1].endsWith(`#${NEW}`))
+    assert.equal(await savedValue(), SAVED)
+  })
+
+  it('restores the previous commit when the retry after removal fails', async () => {
+    await writeManifest(SAVED)
+    const installed = []
+    const host = {
       async removeBundle() { return { application: 'applied' } },
       async installBundle(spec) {
-        this.calls.push(spec)
-        attempts += 1
-        if (attempts === 1) throw new Error('install failed')
+        installed.push(spec)
+        // The first attempt is the refusal that removes the package; the retry
+        // fails for a real reason, so the previous commit comes back.
+        if (installed.length === 1) throw alreadyInstalled()
+        if (installed.length === 2) throw new Error('install failed')
         return { application: 'applied' }
       },
     }
@@ -104,17 +150,14 @@ describe('updateGit', () => {
       name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host,
     })
     assert.equal(result.outcome, 'restored')
-    assert.equal(host.calls.length, 2)
-    assert.ok(host.calls[1].endsWith(`#${OLD}`))
+    assert.equal(installed.length, 3)
+    assert.ok(installed.at(-1).endsWith(`#${OLD}`))
   })
 
   it('leaves the saved spec as it was after a failed update', async () => {
     await writeManifest(SAVED)
     const host = {
-      calls: [],
-      async removeBundle() { return { application: 'applied' } },
       async installBundle(spec) {
-        this.calls.push(spec)
         // The host saves the pinned spec before failing, as the real one does.
         const manifest = JSON.parse(await readFile(join(profileDir, 'package.json'), 'utf8'))
         manifest.dependencies[NAME] = spec
@@ -126,19 +169,23 @@ describe('updateGit', () => {
     assert.equal(await savedValue(), SAVED)
   })
 
-  it('reports a failed removal without installing', async () => {
+  it('reports a failed removal without installing again', async () => {
     await writeManifest(SAVED)
+    const installed = []
     const host = {
-      calls: [],
       async removeBundle() { throw new Error('bundle in use') },
-      async installBundle(spec) { this.calls.push(spec); return { application: 'applied' } },
+      async installBundle(spec) {
+        installed.push(spec)
+        if (installed.length === 1) throw alreadyInstalled()
+        return { application: 'applied' }
+      },
     }
     const result = await updateGit({
       name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host,
     })
     assert.equal(result.outcome, 'failed')
     assert.equal(result.step, 'remove')
-    assert.equal(host.calls.length, 0)
+    assert.equal(installed.length, 1)
     assert.equal(await savedValue(), SAVED)
   })
 
@@ -161,20 +208,24 @@ describe('updateGit', () => {
   it('restores when cancelled after removal', async () => {
     await writeManifest(SAVED)
     const controller = new AbortController()
+    const calls = []
     const host = {
-      calls: [],
       async removeBundle() {
         controller.abort()
         return { application: 'applied' }
       },
-      async installBundle(spec) { this.calls.push(spec); return { application: 'applied' } },
+      async installBundle(spec) {
+        calls.push(spec)
+        if (calls.length === 1) throw alreadyInstalled()
+        return { application: 'applied' }
+      },
     }
     const result = await updateGit({
       name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host,
       signal: controller.signal,
     })
     assert.equal(result.outcome, 'cancelled')
-    assert.ok(host.calls[0].endsWith(`#${OLD}`))
+    assert.ok(calls[1].endsWith(`#${OLD}`))
     assert.equal(await savedValue(), SAVED)
   })
 })
@@ -186,17 +237,23 @@ describe('updateRegistry', () => {
     assert.equal(result.outcome, 'updated')
   })
 
-  it('passes the request id to the host', async () => {
+  it('passes the request id and the answering registry to the host', async () => {
     let seen
     const host = { async updateBundle(name, version, options) { seen = options; return { result: { application: 'applied' } } } }
-    await updateRegistry({ name: 'x', version: '1.2.3', host, requestId: 'updater:x:1' })
-    assert.deepEqual(seen, { requestId: 'updater:x:1' })
+    await updateRegistry({ name: 'x', version: '1.2.3', host, requestId: 'updater:x:1', registry: 'https://registry.example/' })
+    assert.deepEqual(seen, { requestId: 'updater:x:1', registry: 'https://registry.example/' })
   })
 
-  it('reports a host-reported failure', async () => {
-    const host = { async updateBundle() { return { result: { application: 'failed' } } } }
+  it('reports a host-reported failure with its code and diagnostic', async () => {
+    const host = {
+      async updateBundle() {
+        return { result: { application: 'failed', error: { code: 'operation-error', diagnostic: 'ERR_PNPM_NO_MATCHING_VERSION' } } }
+      },
+    }
     const result = await updateRegistry({ name: 'x', version: '1.2.3', host })
     assert.equal(result.outcome, 'failed')
+    assert.match(result.reason, /operation-error/)
+    assert.match(result.reason, /ERR_PNPM_NO_MATCHING_VERSION/)
   })
 
   it('reports a thrown failure', async () => {

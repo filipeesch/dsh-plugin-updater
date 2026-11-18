@@ -37,11 +37,12 @@ async function savedValue() {
 }
 
 describe('updateGit with build approval', () => {
-  it('approves and installs for a trusted repository', async () => {
+  it('approves and installs without removing the running package', async () => {
     await writeManifest(SAVED)
     const calls = []
+    const removals = []
     const host = {
-      async removeBundle() { return { application: 'applied' } },
+      async removeBundle(name) { removals.push(name); return { application: 'applied' } },
       async installBundle(spec) {
         calls.push({ spec })
         const error = new Error('build blocked')
@@ -58,17 +59,20 @@ describe('updateGit with build approval', () => {
       },
     })
     assert.equal(result.outcome, 'updated')
-    assert.deepEqual(result.approved, [KEY])
+    // The approval is recorded on the host log, not in the row.
+    assert.equal('approved' in result, false)
+    assert.deepEqual(removals, [])
     // Two attempts: the plain install that was blocked, then the approved one.
     assert.equal(calls.length, 2)
     assert.ok(calls.at(-1).spec.endsWith(`#${NEW}`))
     assert.equal(await savedValue(), SAVED)
   })
 
-  it('restores and reports an approval request when the answer is ask', async () => {
+  it('asks without leaving the plugin missing', async () => {
     await writeManifest(SAVED)
+    const removals = []
     const host = {
-      async removeBundle() { return { application: 'applied' } },
+      async removeBundle(name) { removals.push(name); return { application: 'applied' } },
       async installBundle(spec) {
         if (spec.endsWith(`#${NEW}`)) throw new Error('build blocked')
         return { application: 'applied' }
@@ -80,9 +84,11 @@ describe('updateGit with build approval', () => {
       approveBuilds: async () => ({ approvalRecorded: [] }),
     })
     assert.equal(result.outcome, 'needsApproval')
+    assert.equal(result.step, 'install')
     assert.deepEqual(result.needsApproval, [KEY])
-    // The plugin must not be left missing while a question is pending.
-    assert.equal(result.restore.application, 'applied')
+    // Nothing was removed, so nothing had to be reinstalled.
+    assert.equal(result.restore, undefined)
+    assert.deepEqual(removals, [])
     assert.equal(await savedValue(), SAVED)
   })
 
@@ -90,7 +96,6 @@ describe('updateGit with build approval', () => {
     await writeManifest(SAVED)
     let attempts = 0
     const host = {
-      async removeBundle() { return { application: 'applied' } },
       async installBundle(spec) {
         attempts += 1
         if (spec.endsWith(`#${NEW}`)) throw new Error('build blocked')
@@ -100,8 +105,8 @@ describe('updateGit with build approval', () => {
     const result = await updateGit({
       name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host,
     })
-    assert.equal(result.outcome, 'restored')
-    assert.equal(attempts, 2)
+    assert.equal(result.outcome, 'failed')
+    assert.equal(attempts, 1)
   })
 
   it('does not run a sibling repository build script without asking', async () => {
@@ -112,8 +117,7 @@ describe('updateGit with build approval', () => {
     const siblingKey = `sibling@https://codeload.github.com/filipeesch/deepseek-harness-kanban-malware/tar.gz/${SHA}`
     const approved = []
     const host = {
-      async removeBundle() { return { application: 'applied' } },
-      async installBundle(spec) {
+      async installBundle() {
         const error = new Error('build blocked')
         error.pendingBuilds = [siblingKey]
         throw error
