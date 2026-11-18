@@ -54,7 +54,7 @@ describe('recheck and installed commits', () => {
       cacheDir,
       pluginManager: {
         async listVersions() {
-          return { status: 'listed', installed: '1.0.0', versions: [{ version: '2.0.0' }] }
+          return { status: 'listed', installed: '1.0.0', versions: [{ version: '2.0.0', bundle: true }] }
         },
       },
       config: () => ({}),

@@ -185,3 +185,99 @@ describe('bundle exports', () => {
     assert.equal(typeof panel.headerOf, 'function')
   })
 })
+
+describe('blocked candidates', () => {
+  it('marks a candidate with no compatible version', () => {
+    const rows = bundle().rowsFromSnapshot({
+      blocked: [{ name: 'dsh-subscriptions', kind: 'registry', installed: '0.3.6', reason: 'no published version is compatible with this DeepSeek Harness' }],
+    })
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].state, 'blocked')
+    assert.equal(rows[0].action, 'none')
+    assert.equal(rows[0].installed, '0.3.6')
+    assert.match(rows[0].reason, /compatible/)
+  })
+
+  it('stays non-actionable when the row is merged with no attempt', () => {
+    const row = { name: 'x', kind: 'registry', action: 'none', state: 'blocked', trusted: false, reason: 'blocked' }
+    const merged = bundle().mergeRow(row, undefined, [])
+    assert.equal(merged.state, 'blocked')
+  })
+
+  it('reports the blocked status label', () => {
+    const status = bundle().statusOf({ state: 'blocked' }, translate)
+    assert.equal(status.tone, 'warn')
+    assert.equal(status.label, 'phase.blocked')
+  })
+})
+
+describe('diagnosis text', () => {
+  const FAILED = {
+    name: 'dsh-subscriptions',
+    kind: 'registry',
+    state: 'failed',
+    installed: '0.3.6',
+    available: '0.3.7',
+    failure: { code: 'operation-error', diagnostic: 'ERR_PNPM_NO_MATCHING_VERSION', restored: false },
+    output: { text: 'pnpm output tail', truncated: false },
+  }
+
+  it('names the cause in one line', () => {
+    assert.equal(bundle().diagnosisLine(FAILED), 'operation-error: ERR_PNPM_NO_MATCHING_VERSION')
+  })
+
+  it('falls back to the reason when no failure was reported', () => {
+    assert.equal(bundle().diagnosisLine({ reason: 'the check failed' }), 'the check failed')
+  })
+
+  it('copies the facts a reader needs', () => {
+    const text = bundle().diagnosisText(FAILED)
+    assert.match(text, /plugin: dsh-subscriptions/)
+    assert.match(text, /installed: 0\.3\.6/)
+    assert.match(text, /target: 0\.3\.7/)
+    assert.match(text, /code: operation-error/)
+    assert.match(text, /diagnostic: ERR_PNPM_NO_MATCHING_VERSION/)
+    assert.match(text, /restored: no/)
+    assert.match(text, /output:\npnpm output tail/)
+  })
+
+  it('omits the output section when there is none', () => {
+    const text = bundle().diagnosisText({ ...FAILED, output: undefined })
+    assert.equal(text.includes('output:'), false)
+  })
+
+  it('knows which rows have something to copy', () => {
+    assert.equal(bundle().hasDiagnosis(FAILED), true)
+    assert.equal(bundle().hasDiagnosis({ state: 'idle' }), false)
+  })
+})
+
+describe('a failed recovery', () => {
+  const ROW = {
+    name: 'dsh-kanban',
+    kind: 'git',
+    state: 'failed',
+    installed: '0.34.0',
+    commit: 'abc1234',
+    failure: {
+      code: 'operation-error',
+      diagnostic: 'target failed',
+      restored: false,
+      recovery: { code: 'operation-error', diagnostic: 'rollback failed' },
+      reason: 'could not restore dsh-kanban; reinstall github:filipeesch/x#abc1234 to recover',
+    },
+  }
+
+  it('names both failures in the line', () => {
+    const line = bundle().diagnosisLine(ROW)
+    assert.match(line, /operation-error: target failed/)
+    assert.match(line, /reinstall failed: operation-error: rollback failed/)
+  })
+
+  it('copies the recovery and the spec to reinstall', () => {
+    const text = bundle().diagnosisText(ROW)
+    assert.match(text, /recovery: reinstall failed: operation-error: rollback failed/)
+    assert.match(text, /reason: could not restore/)
+    assert.match(text, /#abc1234 to recover/)
+  })
+})

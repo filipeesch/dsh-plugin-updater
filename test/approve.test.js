@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { decideBuildApproval, describeApproval } from '../src/approve.js'
+import { decideBuildApproval } from '../src/approve.js'
 
 const REPO = 'github.com/filipeesch/deepseek-harness-kanban'
 const KEY = 'dsh-kanban@https://codeload.github.com/filipeesch/deepseek-harness-kanban/tar.gz/a39fef73ff6b885c2f39ccef86dcd75559405048'
@@ -55,15 +55,6 @@ describe('decideBuildApproval', () => {
   it('deduplicates reported keys', () => {
     const decision = decideBuildApproval({ pendingBuilds: [KEY, KEY], repository: REPO, trustedRepositories: [REPO] })
     assert.equal(decision.keys.length, 1)
-  })
-})
-
-describe('describeApproval', () => {
-  it('names the repository, keys, and packages', () => {
-    const described = describeApproval(REPO, [KEY])
-    assert.equal(described.repository, REPO)
-    assert.deepEqual(described.packages, ['dsh-kanban'])
-    assert.deepEqual(described.keys, [KEY])
   })
 })
 

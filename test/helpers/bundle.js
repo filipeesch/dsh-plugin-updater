@@ -45,9 +45,10 @@ export const ZOD_REQUIRED = { skip: hasZod() ? false : 'zod resolves from the ho
 
 /**
  * Load the bundle the way the client does.
+ * @param {{React?: object}} [options] A React stand-in to use instead of the default one.
  * @returns {{exports: Map<string, object>, requested: string[]}} Loaded factories and every specifier asked for.
  */
-export function loadBundle() {
+export function loadBundle(options = {}) {
   const source = readFileSync(new URL('../../client.js', import.meta.url), 'utf8')
   const registered = new Map()
   const requested = []
@@ -55,7 +56,7 @@ export function loadBundle() {
     __ModuleLoader__: { load(options) { registered.set(options.id, options) } },
   }
   /** A React stand-in that records nothing and returns plain descriptors. */
-  const React = {
+  const React = options.React ?? {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     Fragment: 'Fragment',
     useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],

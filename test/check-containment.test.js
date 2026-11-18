@@ -45,7 +45,7 @@ describe('a throwing candidate does not fail the check', () => {
       listVersions: async () => ({
         status: 'listed',
         installed: '1.0.0',
-        versions: [{ version: '1.1.0' }],
+        versions: [{ version: '1.1.0', bundle: true }],
       }),
     })
     assert.equal(result.states.length, 2)
@@ -74,7 +74,7 @@ describe('a throwing candidate does not fail the check', () => {
       cache: cacheDouble(),
       listVersions: async (name) => {
         if (name === 'a') throw new Error('registry exploded')
-        return { status: 'listed', installed: '1.0.0', versions: [{ version: '2.0.0' }] }
+        return { status: 'listed', installed: '1.0.0', versions: [{ version: '2.0.0', bundle: true }] }
       },
     })
     // The healthy candidate's update survives the broken one's throw.
@@ -130,7 +130,7 @@ describe('a malformed candidate is contained too', () => {
       ],
       commits: new Map(),
       cache: cacheDouble(),
-      listVersions: async () => ({ status: 'listed', installed: '1.0.0', versions: [{ version: '2.0.0' }] }),
+      listVersions: async () => ({ status: 'listed', installed: '1.0.0', versions: [{ version: '2.0.0', bundle: true }] }),
     })
     assert.deepEqual(result.updates.map((entry) => entry.name), ['ok'])
     const broken = result.unchecked.find((entry) => entry.name === 'bad')

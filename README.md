@@ -22,10 +22,11 @@ Or add the dependency to the profile and select the bundle:
 
 - Detects available updates for registry plugins and for git plugins. A git plugin is current when its installed commit equals the repository HEAD; the displayed version is the one the repository declares at HEAD.
 - Shows release notes for a git update, read from the commits between the installed commit and HEAD.
-- Updates a git plugin by removing and reinstalling it, and restores the previous commit if the attempt fails or is cancelled. The saved dependency spec is left unpinned, so later detection keeps following HEAD.
+- Updates a git plugin by installing the new commit over the running plugin, and removes and reinstalls it only when the host refuses that because it is executing the bundle. The previous commit is restored if an attempt that removed the plugin fails or is cancelled, and the saved dependency spec is left unpinned so later detection keeps following HEAD.
 - Offers a reload, rather than an update, for a plugin installed from a local directory, and only while its files are newer than the running application.
 - Approves build scripts automatically only for repositories you mark as trusted; anything else asks first, with the exact entries shown before you decide.
-- Shows each update while it runs: the current step, the package manager output on demand, and a completion notice even when the panel is closed.
+- Shows each update while it runs: the current step, release notes and the package manager output side by side, and a completion notice even when the panel is closed.
+- Explains a failure with the host's own code and diagnostic, keeps the package manager output, and offers **Copy details** for pasting into an issue or a chat.
 - Keeps the settled result on its row until you dismiss it or start another check, so a finished update never disappears silently.
 - Checks on start and every 60 minutes, in the background, and offers a manual check. Opening the panel reads the current state instead of starting another detection.
 
@@ -47,8 +48,9 @@ Every git candidate whose repository is not trusted offers **Trust this reposito
 - It does not update DeepSeek Harness itself.
 - It does not install new plugins; use the application's own installation dialog for that.
 - The periodic check advances only while the interface is open. Opening the panel reads the current state; a detection starts at interface start, every 60 minutes, or when you ask for one. A check the host starts on its own is reflected when it finishes; the refresh control shows progress for checks started from the panel.
-- Replacing a git plugin removes it before installing the new commit, so the plugin is briefly absent. The previous commit is restored if the installation fails.
+- A git update installs the new commit over the running plugin. When the host refuses that because it is executing the bundle, the plugin is removed and installed again, so it is briefly absent; the previous commit is restored if an attempt that removed it fails.
 - Release notes need a local clone of the repository, kept in a cache of at most 100 MB. A repository larger than that is fetched again on each check.
+- A registry plugin whose newer versions all reject the running DeepSeek Harness is listed with the reason and no update action; there is no override.
 - It registers no agent tool; every operation is a user action.
 
 ## Requirements

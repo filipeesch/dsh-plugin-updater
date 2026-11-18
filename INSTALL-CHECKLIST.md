@@ -44,7 +44,9 @@ Click the icon or the label.
 
 **Expect one flat row per pending plugin**, separated by hairlines, showing the name, a source chip (`GitHub` / `npm` / `Local`), the version change (`0.34.0 → 0.35.0`) or a commit count when the version did not move, a status badge and the row action.
 
-**Expect a "Show changes" link** on a git row. Open it: the commit messages appear and scroll inside the row when long.
+**Expect "Show changes" and "Show output"** on a git row. Open both in a wide panel column: they sit side by side; narrow the panel and they stack, each still scrolling inside the row.
+
+**Expect a candidate whose every newer version rejects this Harness to show "No compatible version"** with the reason and no Update action.
 
 ## 5. Trust a repository from its row
 
@@ -58,7 +60,9 @@ On a git row, look for **Trust this repository**.
 
 Back on **Updates**, click **Update** on a row and watch closely.
 
-**Expect the row to show the current step**: Checking, Removing, Installing or Restoring. **Show output** reveals the package manager lines and keeps appending while the step runs.
+**Expect the row to show the current step**: Checking, Installing, Removing or Restoring. **Show output** reveals the package manager lines and keeps appending while the step runs.
+
+**Expect the plugin to stay installed while the new commit installs.** On a host with hot module replacement the first attempt is refused and the plugin is removed before the retry; on a host without it, the new commit installs over the running one and the result asks for a restart.
 
 **Expect a completion notice** at the top of the window even if you close the panel, and a **View details** action that opens the panel.
 
@@ -92,7 +96,7 @@ If no notice appeared, that is also correct: it is shown only when the host actu
 
 Optional but valuable. Pick a git plugin and temporarily point it at a commit that cannot install, or disconnect the network mid-update.
 
-**Expect:** the previous commit is reinstalled, the row reports **Failed** or **Restored** with the reason, the output opens by itself, and the plugin still works afterwards. The `package.json` value must again end with no pinned commit.
+**Expect:** the row reports **Failed** (nothing was removed, the installed version is left in place) or **Restored** (the previous commit was reinstalled), with the host's code and diagnostic instead of a generic sentence, the output opens by itself, **Copy details** puts that diagnosis on the clipboard, and the plugin still works afterwards. The `package.json` value must again end with no pinned commit.
 
 ## What I could not verify
 

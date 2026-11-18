@@ -53,7 +53,7 @@ function service(listVersions) {
 }
 
 /** A listed answer offering 2.0.0. */
-const newer = { status: 'listed', installed: '1.0.0', versions: [{ version: '2.0.0' }] }
+const newer = { status: 'listed', installed: '1.0.0', versions: [{ version: '2.0.0', bundle: true }] }
 /** A listed answer with nothing newer. */
 const current = { status: 'listed', installed: '1.0.0', versions: [] }
 

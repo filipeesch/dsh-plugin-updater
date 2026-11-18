@@ -15,6 +15,7 @@ import { runBatch } from './batch.js'
 import { runCheck } from './check.js'
 import { CloneCache } from './clone-cache.js'
 import { readConfig, mergeConfig } from './config.js'
+import { describeFailure } from './diagnosis.js'
 import { readBundles, readInstalledCommits } from './profile.js'
 import { CheckScheduler } from './schedule.js'
 import { parseDependency } from './spec.js'
@@ -35,7 +36,7 @@ export class UpdaterService {
    *   config: () => object,
    *   writeConfig: (patch: object) => Promise<void>,
    *   emit: (event: string, payload: object) => void,
-   *   log?: {warn: (...args: unknown[]) => void}
+   *   log?: {warn?: (...args: unknown[]) => void, info?: (...args: unknown[]) => void}
    * }} options Host wiring.
    */
   constructor(options) {
@@ -44,7 +45,7 @@ export class UpdaterService {
     this.configOf = options.config
     this.writeConfig = options.writeConfig
     this.emit = options.emit
-    this.log = options.log ?? { warn: () => {} }
+    this.log = options.log ?? {}
     this.cache = new CloneCache({ directory: options.cacheDir ?? join(homedir(), '.dsh', 'plugin-updater', 'clones') })
     this.hostStart = Date.now()
     this.lastCheck = undefined
@@ -284,15 +285,18 @@ export class UpdaterService {
       }
     } else {
       const updates = this.lastCheck.updates.filter((entry) => entry.name !== name)
+      const blocked = (this.lastCheck.blocked ?? []).filter((entry) => entry.name !== name)
       const ignored = this.lastCheck.ignored.filter((entry) => entry.name !== name)
       const unchecked = this.lastCheck.unchecked.filter((entry) => entry.name !== name)
       updates.push(...result.updates)
+      blocked.push(...result.blocked)
       ignored.push(...result.ignored)
       unchecked.push(...result.unchecked)
       this.lastCheck = {
         ...this.lastCheck,
         candidates: bundles,
         updates,
+        blocked,
         ignored,
         unchecked,
         total: updates.length + this.lastCheck.reloads.length + unchecked.length,
@@ -444,6 +448,9 @@ export class UpdaterService {
         host: this.pluginManager,
         signal: options.signal,
         requestId: options.requestId,
+        // A decision already made reaches the first attempt, so an authorised
+        // replay never starts with the install the user rejected.
+        initialApproval: options.approvedBuilds,
         onPhase: announce,
         // Approval is decided against the repositories the user trusted, from
         // the keys the failed run itself reported. A decision already made on
@@ -451,7 +458,10 @@ export class UpdaterService {
         decideApproval: options.approvedBuilds === undefined
           ? async (failure) => decideBuildApproval({
             pendingBuilds: /** @type {{pendingBuilds?: string[]}} */ (failure.value ?? {}).pendingBuilds,
-            output: /** @type {{result?: {packageResult?: {output?: string}}}} */ (failure.value ?? {}).result?.packageResult?.output,
+            // A git failure reports the package result on the change itself; a
+          // registry one nests it under the Host's update result.
+          output: /** @type {{result?: {packageResult?: {output?: string}}, packageResult?: {output?: string}}} */ (failure.value ?? {}).result?.packageResult?.output
+            ?? /** @type {{packageResult?: {output?: string}}} */ (failure.value ?? {}).packageResult?.output,
             repository: parsed.repository,
             trustedRepositories: this.config().trustedRepositories,
           })
@@ -469,6 +479,9 @@ export class UpdaterService {
       result = await updateRegistry({
         name: item.name,
         version: identity.available,
+        // The registry that answered the version listing travels with the
+        // candidate, so the update asks the same registry order the user saw.
+        registry: /** @type {{registry?: string}} */ (identity).registry,
         host: this.pluginManager,
         requestId: options.requestId,
         onPhase: announce,
@@ -477,11 +490,27 @@ export class UpdaterService {
     this.noteSpecRestore(item.name, result)
     this.noteRestart(item.name, result)
     this.noteApproval(item, state, result)
-    // The package manager's output is what the user needs when a step fails, so
-    // it travels with the result rather than only into the event stream.
-    const packageResult = /** @type {{result?: {packageResult?: object}, restore?: {packageResult?: object}}} */ (result)
-    const output = packageResult.result?.packageResult ?? packageResult.restore?.packageResult
-    return output === undefined ? result : { ...result, output: trimOutput(output) }
+    this.noteApprovedBuilds(item, result)
+    // One diagnosis shape for both paths: the host's code and diagnostic, the
+    // package manager output the failure produced, and whether the previous
+    // version is back in place. The browser renders this instead of inspecting
+    // plugin manager payloads.
+    const failure = describeFailure(result)
+    const output = failure.output
+    // The outcome's own reason travels with the diagnosis: it is where the
+    // recovery names the spec to reinstall, which no other field carries.
+    const described = {
+      ...failure,
+      ...typeof result?.reason === 'string' && result.reason !== '' ? { reason: result.reason } : {},
+    }
+    // The outcome the browser receives is projected onto the fields the panel
+    // reads. The approved entries, raw package results, and Host errors stay on
+    // this side: the diagnosis and the output already carry what a row shows.
+    return {
+      ...wireOutcome(result),
+      ...failure.code === undefined && failure.diagnostic === undefined && output === undefined ? {} : { failure: described },
+      ...output === undefined ? {} : { output },
+    }
   }
 
   /**
@@ -552,6 +581,9 @@ export class UpdaterService {
       name,
       outcome: typeof result?.outcome === 'string' ? result.outcome : 'failed',
       ...typeof result?.reason === 'string' ? { reason: result.reason } : {},
+      ...typeof result?.failure === 'object' && result.failure !== null
+        ? { failure: /** @type {object} */ (result.failure) }
+        : {},
     })
   }
 
@@ -562,7 +594,7 @@ export class UpdaterService {
    */
   initialStep(kind) {
     if (kind === 'local') return 'reloading'
-    if (kind === 'git') return 'removing'
+    if (kind === 'git') return 'installing'
     return 'checking'
   }
 
@@ -673,6 +705,33 @@ export class UpdaterService {
       targetCommit: identity.commit,
       keys,
     })
+  }
+
+  /**
+   * Record an approval in the Host log.
+   *
+   * The approved entries used to be row content, which made every update that
+   * needed one noisier than the update itself. They stay here, where support can
+   * find them, and never travel to the browser.
+   * @param {{name: string, kind: string}} item The attempted candidate.
+   * @param {object} result The settled outcome.
+   * @returns {void}
+   */
+  noteApprovedBuilds(item, result) {
+    // The apply layer keeps the entries on the outcome, because a replay that
+    // failed may have persisted them before its installation failed; a plain
+    // success echoes them on the change.
+    const keys = Array.isArray(result?.approvedBuilds)
+      ? result.approvedBuilds
+      : /** @type {{result?: {approvedBuilds?: unknown}}} */ (result).result?.approvedBuilds
+    if (!Array.isArray(keys) || keys.length === 0) return
+    const bundle = this.lastCheck?.candidates?.find((entry) => entry.name === item.name)
+    const repository = /** @type {{repository?: string}} */ (bundle?.parsed ?? {}).repository ?? 'an unknown repository'
+    const message = `Plugin Updater: approved build scripts for ${repository} (${item.name}): ${keys.join(', ')}`
+    // A Host logger without `info` still has `warn`, and an approval must never
+    // disappear because of the level it was recorded at.
+    if (typeof this.log.info === 'function') this.log.info(message)
+    else this.log.warn?.(message)
   }
 
   /**
@@ -873,7 +932,19 @@ export class UpdaterService {
    */
   cancel() {
     if (this.cancellation === undefined) return { cancelled: false }
+    const requestId = this.run?.current?.requestId
     this.cancellation.abort()
+    // The Host owns the package manager run; its cancellation is bounded and
+    // reports `too-late` once the change is applying. Asking it to stop is what
+    // keeps "cancelled" from being a local label on a running installation.
+    if (typeof requestId === 'string' && typeof this.pluginManager.cancelInstall === 'function') {
+      try {
+        const answer = this.pluginManager.cancelInstall(requestId)
+        if (typeof answer?.catch === 'function') answer.catch(() => undefined)
+      } catch {
+        // A Host without a cancellation window still stops at the next step.
+      }
+    }
     return { cancelled: true }
   }
 
@@ -934,6 +1005,72 @@ export function isTrigger(value) {
   return typeof value === 'string' && TRIGGERS.has(value)
 }
 
+/** The fields of a plugin manager change the browser is allowed to see. */
+const WIRE_CHANGE_FIELDS = ['changed', 'application', 'stage', 'target', 'version', 'enabled', 'restartReason', 'bundle', 'failedAt']
+
+/** The fields of a registry update result the browser is allowed to see. */
+const WIRE_UPDATE_FIELDS = ['from', 'to', 'step']
+
+/**
+ * Project a settled outcome onto the fields the panel reads.
+ *
+ * The browser gets an allowlist, not the Host's raw payload: package results,
+ * Host errors, and the approved build entries stay on this side. The diagnosis
+ * and the output already carry what a row shows.
+ * @param {unknown} result A settled outcome.
+ * @returns {unknown} The outcome the browser may see.
+ */
+function wireOutcome(result) {
+  if (typeof result !== 'object' || result === null) return result
+  const out = /** @type {Record<string, unknown>} */ ({ ...result })
+  delete out.approvedBuilds
+  if (Object.hasOwn(out, 'result')) out.result = wireChangeOrUpdate(out.result)
+  if (Object.hasOwn(out, 'restore')) out.restore = wireChangeOrUpdate(out.restore)
+  return out
+}
+
+/**
+ * Project either a plugin manager change or a registry update result.
+ * @param {unknown} value The value.
+ * @returns {unknown} Its projection.
+ */
+function wireChangeOrUpdate(value) {
+  if (typeof value !== 'object' || value === null) return value
+  if (!Object.hasOwn(value, 'application') && (Object.hasOwn(value, 'result') || Object.hasOwn(value, 'restore'))) {
+    return wireUpdate(value)
+  }
+  return wireChange(value)
+}
+
+/**
+ * Project a registry update result, keeping its nested attempts.
+ * @param {object} value The update result.
+ * @returns {object} Its projection.
+ */
+function wireUpdate(value) {
+  const out = {}
+  for (const field of WIRE_UPDATE_FIELDS) {
+    if (Object.hasOwn(value, field)) out[field] = /** @type {Record<string, unknown>} */ (value)[field]
+  }
+  if (Object.hasOwn(value, 'result')) out.result = wireChange(/** @type {{result: unknown}} */ (value).result)
+  if (Object.hasOwn(value, 'restore')) out.restore = wireChange(/** @type {{restore: unknown}} */ (value).restore)
+  return out
+}
+
+/**
+ * Project one plugin manager change onto the fields the panel reads.
+ * @param {unknown} change The change.
+ * @returns {unknown} Its projection.
+ */
+function wireChange(change) {
+  if (typeof change !== 'object' || change === null) return change
+  const out = {}
+  for (const field of WIRE_CHANGE_FIELDS) {
+    if (Object.hasOwn(change, field)) out[field] = /** @type {Record<string, unknown>} */ (change)[field]
+  }
+  return out
+}
+
 /**
  * Record the lockfile commit on every candidate.
  *
@@ -948,28 +1085,6 @@ function attachInstalledCommits(bundles, commits) {
   for (const bundle of bundles) {
     const commit = commits.get(bundle.name)
     if (commit !== undefined) /** @type {Record<string, unknown>} */ (bundle).installedCommit = commit
-  }
-}
-
-/** Longest package manager excerpt a row carries, in characters. */
-const OUTPUT_LIMIT = 8000
-
-/**
- * Keep the tail of a package manager run, which is where the failure is.
- * @param {unknown} packageResult The run result.
- * @returns {{text: string, truncated: boolean}} The excerpt and whether it was cut.
- */
-function trimOutput(packageResult) {
-  const output = typeof packageResult === 'object' && packageResult !== null
-    ? /** @type {{output?: unknown, exitCode?: unknown}} */ (packageResult)
-    : {}
-  const text = typeof output.output === 'string' ? output.output : ''
-  const exitCode = typeof output.exitCode === 'number' ? output.exitCode : undefined
-  const tail = text.length > OUTPUT_LIMIT ? text.slice(-OUTPUT_LIMIT) : text
-  return {
-    text: tail,
-    truncated: text.length > OUTPUT_LIMIT,
-    ...exitCode === undefined ? {} : { exitCode },
   }
 }
 

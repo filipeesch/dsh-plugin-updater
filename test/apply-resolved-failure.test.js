@@ -41,24 +41,51 @@ async function savedValue() {
 }
 
 describe('a resolved failure is not success', () => {
-  it('restores when the host resolves with application failed', async () => {
+  it('reports a resolved failure without removing the package', async () => {
     await writeManifest(SAVED)
     const installed = []
+    const removals = []
     const host = {
-      async removeBundle() { return { changed: true, application: 'applied', stage: 'remove', target: NAME } },
+      async removeBundle(name) { removals.push(name); return { application: 'applied' } },
       async installBundle(spec) {
         installed.push(spec)
         // The real host resolves this; it does not reject.
         return spec.endsWith(`#${NEW}`)
-          ? { changed: false, application: 'failed', stage: 'install', target: spec, error: { code: 'operation-error' } }
+          ? { changed: false, application: 'failed', stage: 'install', target: spec, error: { code: 'operation-error', diagnostic: 'ERR_PNPM_PEER_DEP_ISSUES' } }
           : { changed: true, application: 'applied', stage: 'install', target: spec }
       },
     }
     const result = await updateGit({
       name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host,
     })
+    assert.equal(result.outcome, 'failed')
+    assert.equal(result.step, 'install')
+    assert.deepEqual(removals, [])
+    assert.equal(installed.length, 1)
+    assert.match(result.reason, /operation-error/)
+    assert.equal(await savedValue(), SAVED)
+  })
+
+  it('restores when the refusal is followed by a failing retry', async () => {
+    await writeManifest(SAVED)
+    const installed = []
+    const host = {
+      async removeBundle() { return { changed: true, application: 'applied', stage: 'remove' } },
+      async installBundle(spec) {
+        installed.push(spec)
+        if (installed.length === 1) {
+          return { changed: false, application: 'failed', stage: 'install', target: spec, error: { code: 'already-installed' } }
+        }
+        if (installed.length === 2) {
+          return { changed: false, application: 'failed', stage: 'install', target: spec, error: { code: 'operation-error' } }
+        }
+        return { changed: true, application: 'applied', stage: 'install', target: spec }
+      },
+    }
+    const result = await updateGit({
+      name: NAME, repository: REPO, saved: SAVED, previousCommit: OLD, targetCommit: NEW, profileDir, host,
+    })
     assert.equal(result.outcome, 'restored')
-    // The previous commit was reinstalled.
     assert.ok(installed.at(-1).endsWith(`#${OLD}`))
     assert.equal(await savedValue(), SAVED)
   })
@@ -83,7 +110,6 @@ describe('a resolved failure is not success', () => {
   it('reports updated only for an applied installation', async () => {
     await writeManifest(SAVED)
     const host = {
-      async removeBundle() { return { application: 'applied' } },
       async installBundle() { return { changed: true, application: 'applied', stage: 'install' } },
     }
     const result = await updateGit({
@@ -96,7 +122,6 @@ describe('a resolved failure is not success', () => {
   it('reports updated for a restart-requiring application', async () => {
     await writeManifest(SAVED)
     const host = {
-      async removeBundle() { return { application: 'applied' } },
       async installBundle() { return { changed: true, application: 'restart-required', stage: 'install', restartReason: 'no-hmr' } },
     }
     const result = await updateGit({

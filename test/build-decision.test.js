@@ -115,9 +115,11 @@ describe('decideBuild', () => {
     assert.equal(result.result.outcome, 'updated')
     assert.deepEqual(result.snapshot.approvals, [])
     const installs = calls.filter((entry) => entry[0] === 'install')
-    assert.equal(installs.length, 2)
-    assert.deepEqual(installs[1][2].approvedBuilds, [KEY])
-    assert.match(installs[1][2].requestId, /^updater:plugin-a:/)
+    // The decision reaches the first attempt, so the already-authorised install
+    // is not preceded by one the user rejected.
+    assert.equal(installs.length, 1)
+    assert.deepEqual(installs[0][2].approvedBuilds, [KEY])
+    assert.match(installs[0][2].requestId, /^updater:plugin-a:/)
     assert.ok(installs[0][1].endsWith('#' + NEW))
     const manifest = JSON.parse(await readFile(join(profileDir, 'package.json'), 'utf8'))
     assert.equal(manifest.dependencies[NAME], SAVED)

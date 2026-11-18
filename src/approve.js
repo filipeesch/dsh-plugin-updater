@@ -10,7 +10,7 @@
  * @module dsh-plugin-updater/approve
  */
 
-import { blockedBuildKeys, keyBelongsToTrusted, splitKey } from './build-approval.js'
+import { blockedBuildKeys, keyBelongsToTrusted } from './build-approval.js'
 
 /**
  * Decide how to handle the build scripts a failed run reported.
@@ -64,14 +64,4 @@ function isUsable(key) {
  */
 function dedupe(keys) {
   return [...new Set(keys)]
-}
-
-/**
- * The disclosure shown when a script was approved automatically.
- * @param {string} repository Repository that was trusted.
- * @param {readonly string[]} keys Keys that were written.
- * @returns {{repository: string, packages: string[], keys: string[]}} What to show.
- */
-export function describeApproval(repository, keys) {
-  return { repository, keys: [...keys], packages: keys.map((key) => splitKey(key).packageName) }
 }
